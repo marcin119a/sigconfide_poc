@@ -63,7 +63,7 @@ MUT_TYPES = {
 }
 
 # sigconfide parameters
-R              = 10       # number of bootstraps
+R              = 100       # number of bootstraps
 PRE_FILTER     = 0.001    # pre-filter trace signatures (None = disabled)
 MAX_WORKERS    = None     # None = auto (CPU count)
 

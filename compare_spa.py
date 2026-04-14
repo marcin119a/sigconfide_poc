@@ -5,7 +5,9 @@ For each (mut_type × noise_level) combination:
   1. sigconfide – hybrid_stepwise_selection, R bootstraps, parallel per sample
   2. SPA         – SigProfilerAssignment.Analyzer.cosmic_fit, same signature pool
 
-Metrics: precision / recall / F1 (mean per-sample + micro)
+Metrics: precision / recall / F1 — reported as mean over samples (macro) and
+micro-averaged from pooled TP/FP/FN. Recall equals sensitivity here
+(TP / (TP + FN) over selected signature sets). Summary CSV also includes runtimes.
 
 Outputs → compare_spa_results.csv   (per-sample, both methods)
           compare_spa_summary.csv   (aggregates)
@@ -13,7 +15,6 @@ Outputs → compare_spa_results.csv   (per-sample, both methods)
 
 import argparse
 import os
-import sys
 import time
 import tempfile
 import warnings
@@ -74,8 +75,8 @@ MUT_TYPES = {
 }
 
 # sigconfide
-R          = 10
-PRE_FILTER = 0.001
+R          = 100
+PRE_FILTER = 0.0001
 MAX_WORKERS = None   # None = CPU count
 
 
@@ -189,12 +190,7 @@ def run_spa(samples_df, gt_raw, cosmic_sub, all_samples,
             samples=samp_path,
             output=out_path,
             signature_database=sig_path,
-            make_plots=False,
-            connected_sigs=False,
-            add_background_signatures=False,
-            verbose=False,
-            context_type=context_type,
-            collapse_to_SBS96=(context_type == "96"),
+            collapse_to_SBS96=False,
         )
     except Exception as e:
         print(f"    [SPA {mut_type}/{noise_level}] ERROR: {e}")
@@ -316,22 +312,59 @@ def run_round(mut_type, noise_level, cfg, max_samples, tmpdir):
     return combined, summary
 
 
-# ── Print comparison table ──────────────────────────────────────────────────
+# ── Print comparison tables ─────────────────────────────────────────────────
+_RECALL_SENS_RENAME = {
+    "sc_micro_recall":  "sc_micro_sens",
+    "spa_micro_recall": "spa_micro_sens",
+}
+
+
+def _fmt_float_cols(df: pd.DataFrame, cols: list, ndigits: int = 4) -> pd.DataFrame:
+    sub = df[[c for c in cols if c in df.columns]].copy()
+    for c in sub.columns:
+        if c in ("mut_type", "noise"):
+            continue
+        if c == "n_samples":
+            sub[c] = pd.to_numeric(sub[c], errors="coerce").map(
+                lambda x: str(int(x)) if pd.notna(x) else "N/A"
+            )
+            continue
+        sub[c] = pd.to_numeric(sub[c], errors="coerce").map(
+            lambda x, nd=ndigits: f"{x:.{nd}f}" if pd.notna(x) else "N/A"
+        )
+    return sub
+
+
 def print_comparison(summaries):
     df = pd.DataFrame(summaries)
-    print("\n── Comparison (mean F1) ────────────────────────────────────────────────")
-    cols = ["mut_type", "noise", "n_samples",
-            "sc_mean_f1", "spa_mean_f1",
-            "sc_micro_f1", "spa_micro_f1",
-            "sc_mean_precision", "spa_mean_precision",
-            "sc_mean_recall", "spa_mean_recall"]
-    available = [c for c in cols if c in df.columns]
-    sub = df[available].copy()
-    for c in available[3:]:
-        sub[c] = pd.to_numeric(sub[c], errors="coerce").map(
-            lambda x: f"{x:.3f}" if pd.notna(x) else "N/A"
-        )
-    print(sub.to_string(index=False))
+    base = ["mut_type", "noise", "n_samples"]
+
+    print("\n── Mean over samples (average of per-sample P/R/F1) ───────────────────")
+    cols = base + [
+        "sc_mean_precision", "spa_mean_precision",
+        "sc_mean_recall", "spa_mean_recall",
+        "sc_mean_f1", "spa_mean_f1",
+    ]
+    print(_fmt_float_cols(df, cols, 4).to_string(index=False))
+
+    print("\n── Micro-averaged (from pooled TP/FP/FN across samples) ────────────────")
+    cols = base + [
+        "sc_micro_precision", "spa_micro_precision",
+        "sc_micro_recall", "spa_micro_recall",
+        "sc_micro_f1", "spa_micro_f1",
+    ]
+    micro_tbl = _fmt_float_cols(df, cols, 4).rename(columns=_RECALL_SENS_RENAME)
+    print(micro_tbl.to_string(index=False))
+
+    print("\n── Runtime (s) ─────────────────────────────────────────────────────────")
+    cols = base + ["sc_time_s", "spa_time_s"]
+    tdf = df[[c for c in cols if c in df.columns]].copy()
+    for c in ("sc_time_s", "spa_time_s"):
+        if c in tdf.columns:
+            tdf[c] = pd.to_numeric(tdf[c], errors="coerce").map(
+                lambda x: f"{x:.1f}" if pd.notna(x) else "N/A"
+            )
+    print(tdf.to_string(index=False))
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -374,14 +407,32 @@ if __name__ == "__main__":
                 all_results.append(combined)
                 all_summaries.append(summary)
 
-                # Quick preview
-                sc_f1  = summary.get("sc_mean_f1",  float("nan"))
-                spa_f1 = summary.get("spa_mean_f1", float("nan"))
-                print(f"  sigconfide mean F1 = {sc_f1:.3f}  "
-                      f"({summary['sc_time_s']}s)")
-                spa_str = (f"{spa_f1:.3f}  ({summary['spa_time_s']}s)"
-                           if pd.notna(spa_f1) else "N/A")
-                print(f"  SPA        mean F1 = {spa_str}")
+                # Quick preview: P, recall (=sensitivity), F1 (mean + micro)
+                sc_mp = summary.get("sc_mean_precision", float("nan"))
+                sc_mr = summary.get("sc_mean_recall", float("nan"))
+                sc_mf1 = summary.get("sc_mean_f1", float("nan"))
+                sc_up = summary.get("sc_micro_precision", float("nan"))
+                sc_ur = summary.get("sc_micro_recall", float("nan"))
+                sc_uf1 = summary.get("sc_micro_f1", float("nan"))
+                print(
+                    f"  sigconfide  mean: P={sc_mp:.3f}  R/sens={sc_mr:.3f}  F1={sc_mf1:.3f}  |  "
+                    f"micro: P={sc_up:.3f}  R/sens={sc_ur:.3f}  F1={sc_uf1:.3f}  "
+                    f"({summary['sc_time_s']}s)"
+                )
+                sp_mp = summary.get("spa_mean_precision", float("nan"))
+                sp_mr = summary.get("spa_mean_recall", float("nan"))
+                sp_mf1 = summary.get("spa_mean_f1", float("nan"))
+                sp_up = summary.get("spa_micro_precision", float("nan"))
+                sp_ur = summary.get("spa_micro_recall", float("nan"))
+                sp_uf1 = summary.get("spa_micro_f1", float("nan"))
+                if pd.notna(sp_mf1):
+                    print(
+                        f"  SPA         mean: P={sp_mp:.3f}  R/sens={sp_mr:.3f}  F1={sp_mf1:.3f}  |  "
+                        f"micro: P={sp_up:.3f}  R/sens={sp_ur:.3f}  F1={sp_uf1:.3f}  "
+                        f"({summary['spa_time_s']}s)"
+                    )
+                else:
+                    print("  SPA         (no result)")
 
     print_comparison(all_summaries)
     print(f"\nTotal time: {time.time()-t_global:.1f}s")
