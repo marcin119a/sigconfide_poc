@@ -76,8 +76,18 @@ MUT_TYPES = {
 
 # sigconfide
 R          = 100
-PRE_FILTER = 0.0001
+PRE_FILTER = 0.001
 MAX_WORKERS = None   # None = CPU count
+
+# Permanently active signatures (never evicted by backward step) — analogous
+# to SPA's permanent_sigs / background_sigs.  Only defined for mut types where
+# biological evidence supports universal presence.
+MANDATORY_SIGS = {
+    "SBS": ["SBS1", "SBS5"],
+    "DBS": [],
+    "ID":  [],
+    "CN":  [],
+}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -118,9 +128,10 @@ def _aggregate(df: pd.DataFrame, prefix: str) -> dict:
 
 # ── sigconfide worker (separate process) ────────────────────────────────────
 def _sc_worker(args):
-    sample, m, true_sigs_list, P, sig_names, R, pre_filter = args
+    sample, m, true_sigs_list, P, sig_names, R, pre_filter, mandatory_idx = args
     sel_idx, _, _ = hybrid_stepwise_selection(
-        m, P, R=R, pre_filter_threshold=pre_filter
+        m, P, R=R, pre_filter_threshold=pre_filter,
+        mandatory_indices=mandatory_idx if mandatory_idx else None,
     )
     pred = set(sig_names[sel_idx].tolist())
     true = set(true_sigs_list)
@@ -132,6 +143,11 @@ def run_sigconfide(samples_df, gt_raw, cosmic_sub, sig_names, all_samples,
                    mut_type, noise_level):
     gt_col_map = {_norm(c): c for c in gt_raw.columns}
 
+    mandatory_names = MANDATORY_SIGS.get(mut_type, [])
+    sig_names_list  = sig_names.tolist()
+    mandatory_idx   = [sig_names_list.index(s) for s in mandatory_names
+                       if s in sig_names_list]
+
     tasks = []
     for sample in all_samples:
         m = samples_df[sample].values.astype(float)
@@ -139,7 +155,8 @@ def run_sigconfide(samples_df, gt_raw, cosmic_sub, sig_names, all_samples,
                  else gt_col_map.get(_norm(sample))
         true_sigs = gt_raw.index[gt_raw[gt_col] > 0].tolist() if gt_col else []
         tasks.append((sample, m, true_sigs,
-                      cosmic_sub.values.astype(float), sig_names, R, PRE_FILTER))
+                      cosmic_sub.values.astype(float), sig_names, R, PRE_FILTER,
+                      mandatory_idx))
 
     t0 = time.time()
     results = []
