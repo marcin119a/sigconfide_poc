@@ -4,7 +4,7 @@ from sigconfide.decompose.qp import decomposeQP
 from sigconfide.utils.utils import is_wholenumber
 
 
-def _bootstrap_matrix(m, mutation_count, R):
+def _bootstrap_matrix(m, mutation_count, R, bootstrap_method='multinomial'):
     K = len(m)
     if mutation_count is None:
         if all(is_wholenumber(v) for v in m):
@@ -13,12 +13,23 @@ def _bootstrap_matrix(m, mutation_count, R):
             raise ValueError(
                 "Specify 'mutation_count' or provide integer mutation counts in 'm'."
             )
+    m_counts = m * (mutation_count / m.sum())
     m = m / m.sum()
-    cols = [
-        np.bincount(np.random.choice(K, size=mutation_count, p=m), minlength=K)
-        / mutation_count
-        for _ in range(R)
-    ]
+
+    if bootstrap_method == 'poisson':
+        def _sample():
+            sampled = np.random.poisson(m_counts)
+            total = sampled.sum()
+            if total == 0:
+                return m  # fallback: degenerate sample
+            return sampled / total
+        cols = [_sample() for _ in range(R)]
+    else:
+        cols = [
+            np.bincount(np.random.choice(K, size=mutation_count, p=m), minlength=K)
+            / mutation_count
+            for _ in range(R)
+        ]
     return np.column_stack(cols)
 
 
@@ -41,6 +52,7 @@ def hybrid_stepwise_selection(
     decomposition_method=decomposeQP,
     pre_filter_threshold=None,
     mandatory_indices=None,
+    bootstrap_method='multinomial',
 ):
     """
     pre_filter_threshold : float or None
@@ -84,7 +96,7 @@ def hybrid_stepwise_selection(
         mandatory_local = set(_mandatory)
     # ------------------------------------------------------------------------
 
-    M = _bootstrap_matrix(m, mutation_count, R)
+    M = _bootstrap_matrix(m, mutation_count, R, bootstrap_method=bootstrap_method)
     # Mandatory sigs are in `selected` from the start (same as all others since
     # we begin with the full set, but the backward step will never evict them).
     selected = set(range(N))

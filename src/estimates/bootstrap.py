@@ -2,7 +2,8 @@ import numpy as np
 from sigconfide.utils.utils import is_wholenumber, FrobeniusNorm
 from sigconfide.decompose.qp import decomposeQP
 
-def bootstrapSigExposures(m, P, R, mutation_count=None, decomposition_method=decomposeQP):
+def bootstrapSigExposures(m, P, R, mutation_count=None, decomposition_method=decomposeQP,
+                          bootstrap_method='multinomial'):
     """
     Obtain the bootstrap distribution of signature exposures for a tumor sample.
 
@@ -19,6 +20,12 @@ def bootstrapSigExposures(m, P, R, mutation_count=None, decomposition_method=dec
             the summation of all the counts. If 'm' is probabilities, 'mutation_count' must be specified.
         decomposition_method (function, optional): The method selected to get the optimal solution.
             It should be a function. Default is 'decomposeQP'.
+        bootstrap_method (str, optional): Resampling strategy. One of:
+            - 'multinomial' (default): draw `mutation_count` mutations from the empirical
+              distribution — the total count is fixed across replicates.
+            - 'poisson': draw each mutation-type count independently from
+              Poisson(observed_count) — the total varies between replicates, which
+              better reflects count-data uncertainty.
 
     Returns:
         tuple: A tuple containing two numpy arrays.
@@ -49,6 +56,9 @@ def bootstrapSigExposures(m, P, R, mutation_count=None, decomposition_method=dec
         else:
             raise ValueError("Please specify the parameter 'mutation_count' in the function call or provide mutation counts in parameter 'm'.")
 
+    # Keep raw counts for Poisson bootstrap before normalising.
+    m_counts = m * (mutation_count / m.sum())  # scaled counts regardless of input form
+
     # Normalize m to be a vector of probabilities.
     m = m / np.sum(m)
 
@@ -56,12 +66,20 @@ def bootstrapSigExposures(m, P, R, mutation_count=None, decomposition_method=dec
     # Matrix of signature exposures per replicate (column)
     K = len(m)  # number of mutation types
 
-    def bootstrap_sample(m, mutation_count, K):
-        mutations_sampled = np.random.choice(K, size=mutation_count, p=m)
-        return np.bincount(mutations_sampled, minlength=K) / mutation_count
+    if bootstrap_method == 'poisson':
+        def _sample():
+            sampled = np.random.poisson(m_counts)
+            total = sampled.sum()
+            if total == 0:
+                return m  # fallback: degenerate sample
+            return sampled / total
+    else:
+        def _sample():
+            mutations_sampled = np.random.choice(K, size=mutation_count, p=m)
+            return np.bincount(mutations_sampled, minlength=K) / mutation_count
 
     exposures = np.column_stack([
-        decomposition_method(bootstrap_sample(m, mutation_count, K), P) for _ in range(R)
+        decomposition_method(_sample(), P) for _ in range(R)
     ])
     exposures = exposures / np.sum(exposures, axis=0)  # Normalize exposures
 
