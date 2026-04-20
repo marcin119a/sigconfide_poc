@@ -70,9 +70,9 @@ MAX_WORKERS    = None     # None = auto (CPU count)
 
 # ── Worker (runs in a separate process) ─────────────────────────────────────
 def run_sample(args):
-    sample, m, true_sigs_set, P, sig_names, R, pre_filter = args
+    sample, m, true_sigs_set, P, sig_names, R, pre_filter, bootstrap_method = args
     sel_idx, _, _ = hybrid_stepwise_selection(
-        m, P, R=R, pre_filter_threshold=pre_filter
+        m, P, R=R, pre_filter_threshold=pre_filter, bootstrap_method=bootstrap_method
     )
     pred_sigs = set(sig_names[sel_idx].tolist())
     true_sigs = set(true_sigs_set)
@@ -99,7 +99,8 @@ def run_sample(args):
 
 
 # ── One benchmark round (mut_type × noise_level) ───────────────────────────
-def run_benchmark(mut_type: str, noise_level: str, cfg: dict, max_samples=None):
+def run_benchmark(mut_type: str, noise_level: str, cfg: dict, max_samples=None,
+                  bootstrap_method='multinomial'):
     base = BENCHMARK_DIR
     cosmic   = pd.read_csv(base / cfg["cosmic"], sep="\t", index_col=0)
     gt_raw   = pd.read_csv(base / cfg["gt"], index_col=0)      # rows=sigs, cols=samples
@@ -139,7 +140,7 @@ def run_benchmark(mut_type: str, noise_level: str, cfg: dict, max_samples=None):
             true_sigs = gt_raw.index[gt_raw[gt_col] > 0].tolist()
         else:
             true_sigs = []
-        tasks.append((sample, m, true_sigs, P, sig_names, R, PRE_FILTER))
+        tasks.append((sample, m, true_sigs, P, sig_names, R, PRE_FILTER, bootstrap_method))
 
     t0 = time.time()
     results = []
@@ -229,6 +230,12 @@ def parse_args():
         "--out-summary", default="benchmark_diaz_gay_summary.csv",
         help="CSV file for aggregate metrics",
     )
+    p.add_argument(
+        "--bootstrap-method", default="multinomial",
+        choices=["multinomial", "poisson"],
+        help="Bootstrap resampling strategy: 'multinomial' (fixed total count, default) "
+             "or 'poisson' (independent Poisson draws per mutation type)",
+    )
     return p.parse_args()
 
 
@@ -246,6 +253,7 @@ if __name__ == "__main__":
             df, summary = run_benchmark(
                 mut_type, noise_level, cfg,
                 max_samples=args.max_samples,
+                bootstrap_method=args.bootstrap_method,
             )
             all_results.append(df)
             all_summaries.append(summary)

@@ -4,7 +4,7 @@ from sigconfide.decompose.qp import decomposeQP
 from sigconfide.utils.utils import is_wholenumber
 
 
-def _bootstrap_matrix(m, mutation_count, R):
+def _bootstrap_matrix(m, mutation_count, R, bootstrap_method='multinomial'):
     K = len(m)
     if mutation_count is None:
         if all(is_wholenumber(v) for v in m):
@@ -13,12 +13,23 @@ def _bootstrap_matrix(m, mutation_count, R):
             raise ValueError(
                 "Specify 'mutation_count' or provide integer mutation counts in 'm'."
             )
+    m_counts = m * (mutation_count / m.sum())
     m = m / m.sum()
-    cols = [
-        np.bincount(np.random.choice(K, size=mutation_count, p=m), minlength=K)
-        / mutation_count
-        for _ in range(R)
-    ]
+
+    if bootstrap_method == 'poisson':
+        def _sample():
+            sampled = np.random.poisson(m_counts)
+            total = sampled.sum()
+            if total == 0:
+                return m  # fallback: degenerate sample
+            return sampled / total
+        cols = [_sample() for _ in range(R)]
+    else:
+        cols = [
+            np.bincount(np.random.choice(K, size=mutation_count, p=m), minlength=K)
+            / mutation_count
+            for _ in range(R)
+        ]
     return np.column_stack(cols)
 
 
@@ -31,16 +42,59 @@ def _evaluate(M, P, cols, threshold, decomposition_method):
     return _p_values(exposures, threshold)
 
 
+def _cosine_sim(a, b):
+    denom = np.linalg.norm(a) * np.linalg.norm(b)
+    return float(np.dot(a, b) / denom) if denom > 0 else 0.0
+
+
+def _cosine_prune(m_norm, P, selected, mandatory_local, threshold, decomposition_method):
+    """Iteratively remove signatures whose removal costs less than threshold in cosine similarity."""
+    selected = set(selected)
+    while True:
+        cols = sorted(selected)
+        if len(cols) <= 1:
+            break
+        exp, _ = findSigExposures(
+            m_norm.reshape(-1, 1), P[:, cols], decomposition_method=decomposition_method
+        )
+        base_cos = _cosine_sim(m_norm, P[:, cols] @ exp.flatten())
+
+        best_sig, min_loss = None, float('inf')
+        for s in cols:
+            if s in mandatory_local:
+                continue
+            trial = [x for x in cols if x != s]
+            if not trial:
+                continue
+            exp_t, _ = findSigExposures(
+                m_norm.reshape(-1, 1), P[:, trial], decomposition_method=decomposition_method
+            )
+            loss = base_cos - _cosine_sim(m_norm, P[:, trial] @ exp_t.flatten())
+            if loss < threshold and loss < min_loss:
+                min_loss = loss
+                best_sig = s
+
+        if best_sig is None:
+            break
+        selected.discard(best_sig)
+
+    return selected
+
+
 def hybrid_stepwise_selection(
     m,
     P,
     R,
     mutation_count=None,
     threshold=0.01,
-    significance_level=0.05,
+    significance_level=0.01,
     decomposition_method=decomposeQP,
     pre_filter_threshold=None,
     mandatory_indices=None,
+    bootstrap_method='multinomial',
+    start_full=True,
+    cosine_prune_threshold=None,
+    correlation_penalty=False,
 ):
     """
     pre_filter_threshold : float or None
@@ -52,14 +106,23 @@ def hybrid_stepwise_selection(
     mandatory_indices : list of int or None
         Column indices in the original P that are treated as permanently
         active — analogous to SPA's permanent_sigs / background_sigs.
-        These signatures:
-          1. survive pre_filter removal,
-          2. are present in the active set from the very first bootstrap
-             iteration (so QP always decomposes other signatures relative
-             to them), and
-          3. are skipped in the backward-removal step (cannot be evicted).
-        Useful for biologically ubiquitous signatures (e.g. SBS1, SBS5).
+        These signatures survive pre_filter, seed the active set, and are
+        never evicted by backward removal or cosine pruning.
         Default: None (disabled).
+
+    cosine_prune_threshold : float or None
+        If set, after the bootstrap stepwise loop run a post-hoc greedy pass
+        that removes signatures whose removal reduces cosine similarity by
+        less than this value.  Default: None (disabled).
+
+    correlation_penalty : bool
+        If True, scale the effective significance_level by (1 - max_cosine_sim)
+        where max_cosine_sim is the highest cosine similarity between the
+        candidate/evaluated signature and the current active set.
+        Effect: correlated signatures require stronger bootstrap evidence to
+        be added (forward) and are removed with weaker evidence (backward),
+        directly targeting false positives caused by signature correlation.
+        Default: False.
     """
     N = P.shape[1]
     _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
@@ -84,10 +147,18 @@ def hybrid_stepwise_selection(
         mandatory_local = set(_mandatory)
     # ------------------------------------------------------------------------
 
-    M = _bootstrap_matrix(m, mutation_count, R)
-    # Mandatory sigs are in `selected` from the start (same as all others since
-    # we begin with the full set, but the backward step will never evict them).
-    selected = set(range(N))
+    M = _bootstrap_matrix(m, mutation_count, R, bootstrap_method=bootstrap_method)
+    # start_full=True  → backward+forward (current default)
+    # start_full=False → forward-only from mandatory seeds (higher precision)
+    selected = set(range(N)) if start_full else set(mandatory_local)
+
+    # Precompute pairwise cosine similarities between signature columns (used
+    # only when correlation_penalty=True — zero cost otherwise).
+    if correlation_penalty:
+        norms = np.linalg.norm(P, axis=0)
+        norms[norms == 0] = 1.0
+        P_unit = P / norms
+        cos_matrix = P_unit.T @ P_unit   # shape (N, N)
 
     while True:
         best_benefit = 0.0
@@ -100,9 +171,15 @@ def hybrid_stepwise_selection(
             pv = _evaluate(M, P, np.array(current_cols), threshold, decomposition_method)
             pv_map = {col: pv[i] for i, col in enumerate(current_cols)}
             for s in selected:
-                if s in mandatory_local:        # ← SPA-style: never evict
+                if s in mandatory_local:
                     continue
-                benefit = pv_map[s] - significance_level
+                if correlation_penalty:
+                    others = list(selected - {s} - mandatory_local)
+                    max_sim = float(cos_matrix[s, others].max()) if others else 0.0
+                    eff_sig = significance_level * (1.0 - max_sim)
+                else:
+                    eff_sig = significance_level
+                benefit = pv_map[s] - eff_sig
                 if benefit > best_benefit:
                     best_benefit = benefit
                     best_move = ('remove', s)
@@ -112,7 +189,12 @@ def hybrid_stepwise_selection(
             test_cols = np.array(sorted(selected | {s}))
             pv = _evaluate(M, P, test_cols, threshold, decomposition_method)
             s_pos = list(test_cols).index(s)
-            benefit = significance_level - pv[s_pos]
+            if correlation_penalty and selected:
+                max_sim = float(cos_matrix[s, list(selected)].max())
+                eff_sig = significance_level * (1.0 - max_sim)
+            else:
+                eff_sig = significance_level
+            benefit = eff_sig - pv[s_pos]
             if benefit > best_benefit:
                 best_benefit = benefit
                 best_move = ('add', s)
@@ -125,6 +207,14 @@ def hybrid_stepwise_selection(
             selected.discard(sig)
         else:
             selected.add(sig)
+
+    # optional post-hoc cosine pruning
+    if cosine_prune_threshold is not None:
+        m_norm = m / m.sum()
+        selected = _cosine_prune(
+            m_norm, P, selected, mandatory_local,
+            cosine_prune_threshold, decomposition_method
+        )
 
     local_indices = np.array(sorted(selected))
 

@@ -128,10 +128,11 @@ def _aggregate(df: pd.DataFrame, prefix: str) -> dict:
 
 # ── sigconfide worker (separate process) ────────────────────────────────────
 def _sc_worker(args):
-    sample, m, true_sigs_list, P, sig_names, R, pre_filter, mandatory_idx = args
+    sample, m, true_sigs_list, P, sig_names, R, pre_filter, mandatory_idx, bootstrap_method = args
     sel_idx, _, _ = hybrid_stepwise_selection(
         m, P, R=R, pre_filter_threshold=pre_filter,
         mandatory_indices=mandatory_idx if mandatory_idx else None,
+        bootstrap_method=bootstrap_method,
     )
     pred = set(sig_names[sel_idx].tolist())
     true = set(true_sigs_list)
@@ -140,7 +141,7 @@ def _sc_worker(args):
 
 # ── sigconfide – full pass ──────────────────────────────────────────────────
 def run_sigconfide(samples_df, gt_raw, cosmic_sub, sig_names, all_samples,
-                   mut_type, noise_level):
+                   mut_type, noise_level, bootstrap_method='multinomial'):
     gt_col_map = {_norm(c): c for c in gt_raw.columns}
 
     mandatory_names = MANDATORY_SIGS.get(mut_type, [])
@@ -156,7 +157,7 @@ def run_sigconfide(samples_df, gt_raw, cosmic_sub, sig_names, all_samples,
         true_sigs = gt_raw.index[gt_raw[gt_col] > 0].tolist() if gt_col else []
         tasks.append((sample, m, true_sigs,
                       cosmic_sub.values.astype(float), sig_names, R, PRE_FILTER,
-                      mandatory_idx))
+                      mandatory_idx, bootstrap_method))
 
     t0 = time.time()
     results = []
@@ -263,7 +264,7 @@ def run_spa(samples_df, gt_raw, cosmic_sub, all_samples,
 
 
 # ── One round (mut_type × noise_level) ───────────────────────────────────────
-def run_round(mut_type, noise_level, cfg, max_samples, tmpdir):
+def run_round(mut_type, noise_level, cfg, max_samples, tmpdir, bootstrap_method='multinomial'):
     base = BENCHMARK_DIR
     cosmic   = pd.read_csv(base / cfg["cosmic"], sep="\t", index_col=0)
     gt_raw   = pd.read_csv(base / cfg["gt"], index_col=0)
@@ -285,7 +286,7 @@ def run_round(mut_type, noise_level, cfg, max_samples, tmpdir):
     print(f"  → sigconfide ...")
     sc_df, sc_time = run_sigconfide(
         samples, gt_raw, cosmic_sub, sig_names, all_samples,
-        mut_type, noise_level,
+        mut_type, noise_level, bootstrap_method=bootstrap_method,
     )
     sc_df = sc_df.set_index("sample")
 
@@ -402,6 +403,10 @@ def parse_args():
                    help="CSV file for per-sample results")
     p.add_argument("--out-summary",    default="compare_spa_summary.csv",
                    help="CSV file for aggregate metrics")
+    p.add_argument("--bootstrap-method", default="multinomial",
+                   choices=["multinomial", "poisson"],
+                   help="Bootstrap resampling strategy: 'multinomial' (fixed total count, default) "
+                        "or 'poisson' (independent Poisson draws per mutation type)")
     return p.parse_args()
 
 
@@ -420,6 +425,7 @@ if __name__ == "__main__":
                 combined, summary = run_round(
                     mut_type, noise_level, cfg,
                     args.max_samples, tmpdir,
+                    bootstrap_method=args.bootstrap_method,
                 )
                 all_results.append(combined)
                 all_summaries.append(summary)
