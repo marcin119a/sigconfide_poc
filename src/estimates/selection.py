@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.optimize import nnls as _scipy_nnls
 from sigconfide.estimates.standard import findSigExposures
 from sigconfide.decompose.qp import decomposeQP
 from sigconfide.utils.utils import is_wholenumber
@@ -81,6 +82,55 @@ def _cosine_prune(m_norm, P, selected, mandatory_local, threshold, decomposition
     return selected
 
 
+def _dominant_cleaning(m_norm, P, dominant_threshold, mandatory_local, decomposition_method):
+    """
+    SigProfilerCleaner-inspired preprocessing.
+
+    Identifies dominant signatures (exposure > dominant_threshold), assigns them
+    the maximum plausible attribution via NNLS (largest alpha such that the residual
+    stays non-negative), subtracts that attribution, and returns the cleaned catalog
+    together with the non-dominant sub-matrix of P.
+
+    Mandatory signatures are never treated as dominant and survive unchanged.
+
+    Returns
+    -------
+    cleaned_norm        : ndarray (96,)  — re-normalised residual catalog
+    sub_P               : ndarray (96, K) — P restricted to non-dominant columns
+    dominant_local      : ndarray of int  — column indices in P that were cleaned away
+    non_dominant_local  : ndarray of int  — column indices in P that remain in sub_P
+    effective_fraction  : float           — fraction of mutations left after subtraction
+    """
+    N = P.shape[1]
+    init_exp = decomposition_method(m_norm, P)
+
+    dominant_mask = init_exp > dominant_threshold
+    for idx in mandatory_local:
+        dominant_mask[idx] = False  # mandatory sigs are never cleaned
+
+    dominant_local = np.where(dominant_mask)[0]
+    non_dominant_local = np.where(~dominant_mask)[0]
+
+    if len(dominant_local) == 0 or len(non_dominant_local) < 2:
+        return m_norm, P, np.array([], dtype=int), np.arange(N), 1.0
+
+    # Maximum plausible attribution: NNLS fit of m_norm using only dominant columns
+    alpha_dom, _ = _scipy_nnls(P[:, dominant_local], m_norm)
+    cleaned_unnorm = np.maximum(m_norm - P[:, dominant_local] @ alpha_dom, 0.0)
+    effective_fraction = float(cleaned_unnorm.sum())
+
+    if effective_fraction < 1e-6:
+        return m_norm, P, np.array([], dtype=int), np.arange(N), 1.0
+
+    return (
+        cleaned_unnorm / effective_fraction,
+        P[:, non_dominant_local],
+        dominant_local,
+        non_dominant_local,
+        effective_fraction,
+    )
+
+
 def hybrid_stepwise_selection(
     m,
     P,
@@ -95,6 +145,7 @@ def hybrid_stepwise_selection(
     start_full=True,
     cosine_prune_threshold=None,
     correlation_penalty=False,
+    dominant_cleaning_threshold=None,
 ):
     """
     pre_filter_threshold : float or None
@@ -123,6 +174,18 @@ def hybrid_stepwise_selection(
         be added (forward) and are removed with weaker evidence (backward),
         directly targeting false positives caused by signature correlation.
         Default: False.
+
+    dominant_cleaning_threshold : float or None
+        If set, applies a SigProfilerCleaner-inspired preprocessing step after
+        the optional pre-filter.  Signatures whose initial exposure exceeds this
+        value are considered dominant; their maximum plausible attribution is
+        subtracted from the catalog via NNLS before the bootstrap loop runs.
+        The bootstrap selection then operates on the cleaned residual catalog
+        using only non-dominant signatures.  At the end the dominant signatures
+        are unconditionally reunited with the bootstrap-selected set and the
+        final exposure is refitted on the original catalog.
+        Recommended starting value: 0.3 (signatures carrying > 30 % of mutations).
+        Mandatory signatures are never cleaned.  Default: None (disabled).
     """
     N = P.shape[1]
     _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
@@ -147,7 +210,45 @@ def hybrid_stepwise_selection(
         mandatory_local = set(_mandatory)
     # ------------------------------------------------------------------------
 
-    M = _bootstrap_matrix(m, mutation_count, R, bootstrap_method=bootstrap_method)
+    # P at this point is post-pre-filter (or original if pre-filter disabled).
+    # Save it so the final exposure refit can address the full selected set.
+    P_prefilter = P
+
+    # --- dominant-signature cleaning (SigProfilerCleaner-inspired) ----------
+    # dominant_in_prefilter : column indices in P_prefilter that were cleaned
+    # cleaning_remap        : maps bootstrap-local indices → P_prefilter indices
+    dominant_in_prefilter = np.array([], dtype=int)
+    cleaning_remap = None
+    m_bootstrap = m          # profile fed to _bootstrap_matrix
+    count_bootstrap = mutation_count  # mutation count for bootstrapping
+    P_bootstrap = P          # signature matrix for the bootstrap loop
+
+    if dominant_cleaning_threshold is not None:
+        m_norm = m / m.sum()
+        _cn, _sub_P, _dom, _non_dom, _eff_frac = _dominant_cleaning(
+            m_norm, P, dominant_cleaning_threshold, mandatory_local, decomposition_method
+        )
+        if len(_dom) > 0 and _sub_P.shape[1] >= 2:
+            dominant_in_prefilter = _dom
+            cleaning_remap = _non_dom
+            P_bootstrap = _sub_P
+            N = _sub_P.shape[1]
+            # Bootstrap uses the cleaned, normalised catalog with an adjusted
+            # mutation count so that resampling variance stays realistic.
+            m_bootstrap = _cn
+            if mutation_count is not None:
+                count_bootstrap = max(1, int(round(mutation_count * _eff_frac)))
+            elif all(is_wholenumber(v) for v in m):
+                count_bootstrap = max(1, int(round(m.sum() * _eff_frac)))
+            # else: leave None — _bootstrap_matrix will raise if m is non-integer
+            # remap mandatory_local into the bootstrap (non-dominant) index space
+            non_dom_list = _non_dom.tolist()
+            mandatory_local = {
+                non_dom_list.index(i) for i in mandatory_local if i in non_dom_list
+            }
+    # ------------------------------------------------------------------------
+
+    M = _bootstrap_matrix(m_bootstrap, count_bootstrap, R, bootstrap_method=bootstrap_method)
     # start_full=True  → backward+forward (current default)
     # start_full=False → forward-only from mandatory seeds (higher precision)
     selected = set(range(N)) if start_full else set(mandatory_local)
@@ -155,9 +256,9 @@ def hybrid_stepwise_selection(
     # Precompute pairwise cosine similarities between signature columns (used
     # only when correlation_penalty=True — zero cost otherwise).
     if correlation_penalty:
-        norms = np.linalg.norm(P, axis=0)
+        norms = np.linalg.norm(P_bootstrap, axis=0)
         norms[norms == 0] = 1.0
-        P_unit = P / norms
+        P_unit = P_bootstrap / norms
         cos_matrix = P_unit.T @ P_unit   # shape (N, N)
 
     while True:
@@ -168,7 +269,7 @@ def hybrid_stepwise_selection(
         # Backward: try removing one selected signature.
         # Mandatory signatures are protected — skip them.
         if len(selected) > 2:
-            pv = _evaluate(M, P, np.array(current_cols), threshold, decomposition_method)
+            pv = _evaluate(M, P_bootstrap, np.array(current_cols), threshold, decomposition_method)
             pv_map = {col: pv[i] for i, col in enumerate(current_cols)}
             for s in selected:
                 if s in mandatory_local:
@@ -187,7 +288,7 @@ def hybrid_stepwise_selection(
         # Forward: add one discarded signature
         for s in set(range(N)) - selected:
             test_cols = np.array(sorted(selected | {s}))
-            pv = _evaluate(M, P, test_cols, threshold, decomposition_method)
+            pv = _evaluate(M, P_bootstrap, test_cols, threshold, decomposition_method)
             s_pos = list(test_cols).index(s)
             if correlation_penalty and selected:
                 max_sim = float(cos_matrix[s, list(selected)].max())
@@ -212,15 +313,27 @@ def hybrid_stepwise_selection(
     if cosine_prune_threshold is not None:
         m_norm = m / m.sum()
         selected = _cosine_prune(
-            m_norm, P, selected, mandatory_local,
+            m_norm, P_bootstrap, selected, mandatory_local,
             cosine_prune_threshold, decomposition_method
         )
 
-    local_indices = np.array(sorted(selected))
+    bootstrap_local = np.array(sorted(selected))   # indices in P_bootstrap space
 
-    # map back to original P column indices (identity when pre_filter disabled)
-    global_indices = keep[local_indices] if pre_filter_threshold is not None else local_indices
+    # --- Remap bootstrap-local indices back to P_prefilter, then to original P
+    if cleaning_remap is not None:
+        # bootstrap-local → P_prefilter-local (non-dominant columns)
+        selected_prefilter = cleaning_remap[bootstrap_local]
+        # dominant signatures always rejoin the selected set
+        prefilter_local = np.sort(np.concatenate([dominant_in_prefilter, selected_prefilter]))
+    else:
+        prefilter_local = bootstrap_local
+
+    # P_prefilter-local → original P column indices
+    global_indices = keep[prefilter_local] if pre_filter_threshold is not None else prefilter_local
+
+    # Final exposure refit on original m with the full selected signature set
     exposures, errors = findSigExposures(
-        m.reshape(-1, 1), P[:, local_indices], decomposition_method=decomposition_method
+        m.reshape(-1, 1), P_prefilter[:, prefilter_local],
+        decomposition_method=decomposition_method
     )
     return global_indices, exposures.flatten(), errors

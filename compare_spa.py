@@ -133,6 +133,7 @@ def _sc_worker(args):
         m, P, R=R, pre_filter_threshold=pre_filter,
         mandatory_indices=mandatory_idx if mandatory_idx else None,
         bootstrap_method=bootstrap_method,
+        correlation_penalty=True,
     )
     pred = set(sig_names[sel_idx].tolist())
     true = set(true_sigs_list)
