@@ -48,6 +48,58 @@ def _cosine_sim(a, b):
     return float(np.dot(a, b) / denom) if denom > 0 else 0.0
 
 
+def _spa_error_prune(m_norm, P, selected, mandatory_local, threshold, decomposition_method):
+    """
+    SPA-style iterative removal (mirrors SPA's removeSignatures).
+
+    Each iteration: for every non-mandatory signature, compute the relative
+    reconstruction error ε = ||v - Sa||² / ||v||² after removing it.
+    Remove the signature whose removal causes the smallest increase in ε,
+    provided that increase is ≤ threshold (SPA default: 0.01).
+    Repeat until no removal qualifies or only one signature remains.
+    """
+    selected = set(selected)
+
+    def _eps(cols):
+        if len(cols) == 1:
+            exp = np.array([np.dot(m_norm, P[:, cols[0]]) / np.dot(P[:, cols[0]], P[:, cols[0]])])
+            residual = m_norm - P[:, cols[0]] * exp[0]
+        else:
+            exp = decomposition_method(m_norm, P[:, cols])
+            residual = m_norm - P[:, cols] @ exp
+        v_sq = np.dot(m_norm, m_norm)
+        return np.dot(residual, residual) / v_sq if v_sq > 1e-12 else 0.0
+
+    while True:
+        cols = sorted(selected)
+        if len(cols) <= 1:
+            break
+
+        eps_base = _eps(cols)
+
+        best_sig, min_eps = None, float('inf')
+        for s in cols:
+            if s in mandatory_local:
+                continue
+            trial = [x for x in cols if x != s]
+            if not trial:
+                continue
+            eps_t = _eps(trial)
+            if eps_t < min_eps:
+                min_eps = eps_t
+                best_sig = s
+
+        if best_sig is None:
+            break
+
+        if min_eps - eps_base <= threshold:
+            selected.discard(best_sig)
+        else:
+            break
+
+    return selected
+
+
 def _cosine_prune(m_norm, P, selected, mandatory_local, threshold, decomposition_method):
     """Iteratively remove signatures whose removal costs less than threshold in cosine similarity."""
     selected = set(selected)
@@ -146,6 +198,9 @@ def hybrid_stepwise_selection(
     cosine_prune_threshold=None,
     correlation_penalty=False,
     dominant_cleaning_threshold=None,
+    spa_error_prune_threshold=None,
+    forward_significance=None,
+    backward_significance=None,
 ):
     """
     pre_filter_threshold : float or None
@@ -186,6 +241,26 @@ def hybrid_stepwise_selection(
         final exposure is refitted on the original catalog.
         Recommended starting value: 0.3 (signatures carrying > 30 % of mutations).
         Mandatory signatures are never cleaned.  Default: None (disabled).
+
+    spa_error_prune_threshold : float or None
+        If set, applies a SPA-style post-hoc pruning pass after the bootstrap
+        loop (and after cosine pruning, if enabled).  Mirrors SPA's
+        removeSignatures: iteratively removes the signature whose removal
+        increases relative reconstruction error ε = ||v-Sa||²/||v||² the least,
+        as long as that increase does not exceed this threshold.
+        Recommended value: 0.01 (matches SPA's internal default).
+        Mandatory signatures are never removed.  Default: None (disabled).
+
+    forward_significance : float or None
+        Significance level used in the forward (add) step.  If None, falls
+        back to significance_level.  Set lower than backward_significance to
+        require stronger bootstrap evidence before adding a signature, which
+        directly reduces false positives.  Recommended: 0.005.
+
+    backward_significance : float or None
+        Significance level used in the backward (remove) step.  If None, falls
+        back to significance_level.  Set higher than forward_significance to
+        make removal easier.  Recommended: 0.02.
     """
     N = P.shape[1]
     _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
@@ -253,6 +328,9 @@ def hybrid_stepwise_selection(
     # start_full=False → forward-only from mandatory seeds (higher precision)
     selected = set(range(N)) if start_full else set(mandatory_local)
 
+    _fwd_sig = forward_significance  if forward_significance  is not None else significance_level
+    _bwd_sig = backward_significance if backward_significance is not None else significance_level
+
     # Precompute pairwise cosine similarities between signature columns (used
     # only when correlation_penalty=True — zero cost otherwise).
     if correlation_penalty:
@@ -277,9 +355,9 @@ def hybrid_stepwise_selection(
                 if correlation_penalty:
                     others = list(selected - {s} - mandatory_local)
                     max_sim = float(cos_matrix[s, others].max()) if others else 0.0
-                    eff_sig = significance_level * (1.0 - max_sim)
+                    eff_sig = _bwd_sig * (1.0 - max_sim)
                 else:
-                    eff_sig = significance_level
+                    eff_sig = _bwd_sig
                 benefit = pv_map[s] - eff_sig
                 if benefit > best_benefit:
                     best_benefit = benefit
@@ -292,9 +370,9 @@ def hybrid_stepwise_selection(
             s_pos = list(test_cols).index(s)
             if correlation_penalty and selected:
                 max_sim = float(cos_matrix[s, list(selected)].max())
-                eff_sig = significance_level * (1.0 - max_sim)
+                eff_sig = _fwd_sig * (1.0 - max_sim)
             else:
-                eff_sig = significance_level
+                eff_sig = _fwd_sig
             benefit = eff_sig - pv[s_pos]
             if benefit > best_benefit:
                 best_benefit = benefit
@@ -315,6 +393,14 @@ def hybrid_stepwise_selection(
         selected = _cosine_prune(
             m_norm, P_bootstrap, selected, mandatory_local,
             cosine_prune_threshold, decomposition_method
+        )
+
+    # optional SPA-style ε-based pruning
+    if spa_error_prune_threshold is not None:
+        m_norm = m / m.sum()
+        selected = _spa_error_prune(
+            m_norm, P_bootstrap, selected, mandatory_local,
+            spa_error_prune_threshold, decomposition_method
         )
 
     bootstrap_local = np.array(sorted(selected))   # indices in P_bootstrap space
