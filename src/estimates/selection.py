@@ -3,6 +3,71 @@ from sigconfide.estimates.standard import findSigExposures
 from sigconfide.decompose.qp import decomposeQP
 from sigconfide.utils.utils import is_wholenumber
 
+# Per-mutation-type tuned defaults.
+MUT_TYPE_DEFAULTS = {
+    "SBS": {
+        "significance_level":      0.05,
+        "pre_filter_threshold":    0.001,
+        "spa_error_prune":         0.005,
+        "mandatory_sig_names":     ["SBS1", "SBS5"],
+    },
+    "DBS": {
+        "significance_level":      0.05,
+        "pre_filter_threshold":    0.001,
+        "spa_error_prune":         0.005,
+        "mandatory_sig_names":     ["DBS2"],
+    },
+    "ID": {
+        "significance_level":      0.05,
+        "pre_filter_threshold":    0.001,
+        "spa_error_prune":         None,
+        "mandatory_sig_names":     ["ID1", "ID2"],
+    },
+}
+
+
+def _spa_error_prune(m_norm, P, selected, mandatory_local, threshold, decomposition_method):
+    """
+    Iteratively remove the signature whose removal causes the smallest increase
+    in relative reconstruction error, as long as that increase ≤ threshold.
+    Mandatory signatures are never removed.
+    """
+    selected = set(selected)
+
+    def _eps(cols):
+        if len(cols) == 1:
+            a = np.dot(m_norm, P[:, cols[0]]) / np.dot(P[:, cols[0]], P[:, cols[0]])
+            residual = m_norm - P[:, cols[0]] * a
+        else:
+            exp = decomposition_method(m_norm, P[:, cols])
+            residual = m_norm - P[:, cols] @ exp
+        v_sq = np.dot(m_norm, m_norm)
+        return np.dot(residual, residual) / v_sq if v_sq > 1e-12 else 0.0
+
+    while True:
+        cols = sorted(selected)
+        if len(cols) <= 2:
+            break
+        eps_base = _eps(cols)
+        best_sig, min_eps = None, float("inf")
+        for s in cols:
+            if s in mandatory_local:
+                continue
+            trial = [x for x in cols if x != s]
+            if not trial:
+                continue
+            eps_t = _eps(trial)
+            if eps_t < min_eps:
+                min_eps = eps_t
+                best_sig = s
+        if best_sig is None:
+            break
+        if min_eps - eps_base <= threshold:
+            selected.discard(best_sig)
+        else:
+            break
+    return selected
+
 
 def _bootstrap_matrix(m, mutation_count, R):
     K = len(m)
@@ -41,6 +106,7 @@ def hybrid_stepwise_selection(
     decomposition_method=decomposeQP,
     pre_filter_threshold=None,
     mandatory_indices=None,
+    spa_error_prune_threshold=None,
 ):
     """
     pre_filter_threshold : float or None
@@ -59,6 +125,13 @@ def hybrid_stepwise_selection(
              to them), and
           3. are skipped in the backward-removal step (cannot be evicted).
         Useful for biologically ubiquitous signatures (e.g. SBS1, SBS5).
+        Default: None (disabled).
+
+    spa_error_prune_threshold : float or None
+        After bootstrap selection, iteratively remove the signature whose
+        removal increases relative reconstruction error the least, as long
+        as that increase ≤ threshold.  Reduces false positives caused by
+        correlated signatures in noisy data.  Recommended: 0.005.
         Default: None (disabled).
     """
     N = P.shape[1]
@@ -127,6 +200,23 @@ def hybrid_stepwise_selection(
             selected.add(sig)
 
     local_indices = np.array(sorted(selected))
+
+    # --- optional post-selection error pruning --------------------------------
+    if spa_error_prune_threshold is not None and len(local_indices) > 1:
+        m_norm = m / m.sum()
+        # remap mandatory_local (indices in pre-filtered P) → local sub-matrix positions
+        mandatory_in_pruning = {
+            i for i, li in enumerate(local_indices.tolist()) if li in mandatory_local
+        }
+        pruned = _spa_error_prune(
+            m_norm, P[:, local_indices],
+            set(range(len(local_indices))),
+            mandatory_in_pruning,
+            spa_error_prune_threshold,
+            decomposition_method,
+        )
+        local_indices = local_indices[np.array(sorted(pruned))]
+    # --------------------------------------------------------------------------
 
     # map back to original P column indices (identity when pre_filter disabled)
     global_indices = keep[local_indices] if pre_filter_threshold is not None else local_indices
