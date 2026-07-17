@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-
 from sigconfide.estimates.bootstrap import bootstrapSigExposures
 
 

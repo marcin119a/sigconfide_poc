@@ -1,6 +1,5 @@
 import numpy as np
 import pytest
-
 from sigconfide.estimates.selection import (
     _bootstrap_matrix,
     _p_values,

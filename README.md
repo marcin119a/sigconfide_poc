@@ -180,7 +180,6 @@ src/
   estimates/
     standard.py             # findSigExposures
     bootstrap.py            # bootstrapSigExposures
-    crossvalidation.py      # crossValidationSigExposures
     selection.py            # hybrid_stepwise_selection  ← main selection function
   utils/utils.py            # FrobeniusNorm, is_wholenumber
 examples/
