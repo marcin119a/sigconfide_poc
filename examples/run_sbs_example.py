@@ -39,7 +39,7 @@ PRE_FILTER = 0.001      # drop trace signatures up front (None = disabled)
 def parse_args():
     p = argparse.ArgumentParser(description="sigconfide example on SBS data")
     p.add_argument("sample", nargs="?", default=None,
-                   help="Sample column name (default: the one picked by --sample-index)")
+                   help="Sample column name (default: picked by --sample-index)")
     p.add_argument("--sample-index", type=int, default=0,
                    help="Sample index used when no name is given (default 0)")
     p.add_argument("--noise", choices=list(SAMPLE_FILES), default="clean",
@@ -51,9 +51,10 @@ def main():
     args = parse_args()
 
     # 1. Load the data -------------------------------------------------------
-    cosmic = pd.read_csv(COSMIC_FILE, sep="\t", index_col=0)          # 96 x N_signatures
-    samples = pd.read_csv(SAMPLE_FILES[args.noise], sep="\t", index_col=0)  # 96 x N_samples
-    gt = pd.read_csv(GT_FILE, index_col=0)                            # signatures x samples
+    cosmic = pd.read_csv(COSMIC_FILE, sep="\t", index_col=0)  # 96 x N_signatures
+    # 96 x N_samples
+    samples = pd.read_csv(SAMPLE_FILES[args.noise], sep="\t", index_col=0)
+    gt = pd.read_csv(GT_FILE, index_col=0)  # signatures x samples
 
     # Align the 96 mutation contexts between the panel and the samples
     common_idx = cosmic.index.intersection(samples.index)
@@ -63,11 +64,13 @@ def main():
     # Pick a sample
     sample = args.sample or samples.columns[args.sample_index]
     if sample not in samples.columns:
-        raise SystemExit(f"No sample '{sample}'. Available e.g.: {list(samples.columns[:3])} ...")
+        raise SystemExit(
+            f"No sample '{sample}'. Available e.g.: {list(samples.columns[:3])} ..."
+        )
 
     P = cosmic.values.astype(float)          # signature matrix (96 x N)
     sig_names = np.array(cosmic.columns)     # signature names (SBS1, SBS2, ...)
-    m = samples[sample].values.astype(float)  # sample's mutational profile (vector of 96)
+    m = samples[sample].values.astype(float)  # mutational profile (vector of 96)
 
     print(f"Sample:            {sample}  (noise: {args.noise})")
     print(f"Signature panel:   {P.shape[1]} COSMIC SBS signatures")
