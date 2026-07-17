@@ -17,8 +17,6 @@ This README shows how to run sigconfide on the bundled **example SBS data**
 The project requires **Python ≥ 3.10**. A virtual environment is recommended:
 
 ```bash
-cd /Users/marcin/sigconfide_poc
-
 # create and activate a venv
 python3 -m venv .venv
 source .venv/bin/activate      # Windows: .venv\Scripts\activate

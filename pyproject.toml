@@ -17,6 +17,7 @@ dependencies = [
 dev = [
     "ipykernel",
     "matplotlib",
+    "pytest",
 ]
 
 [tool.setuptools]
@@ -32,6 +33,10 @@ packages = [
 "sigconfide.decompose"  = "src/decompose"
 "sigconfide.estimates"  = "src/estimates"
 "sigconfide.utils"      = "src/utils"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
 
 [tool.black]
 line-length = 88
