@@ -11,8 +11,8 @@ from pathlib import Path
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import pandas as pd
+from matplotlib.lines import Line2D
 
 NOISE_PANELS = [
     ("clean", "No noise"),
@@ -73,9 +73,7 @@ def plot_summary(csv_path: Path, out_path: Path, dpi: int = 150) -> None:
     all_x = pd.concat(
         [df["sc_mean_precision"], df["spa_mean_precision"]], ignore_index=True
     )
-    all_y = pd.concat(
-        [df["sc_mean_recall"], df["spa_mean_recall"]], ignore_index=True
-    )
+    all_y = pd.concat([df["sc_mean_recall"], df["spa_mean_recall"]], ignore_index=True)
     pad = 0.02
     lo = min(all_x.min(), all_y.min()) - pad
     hi = max(all_x.max(), all_y.max()) + pad
@@ -87,9 +85,7 @@ def plot_summary(csv_path: Path, out_path: Path, dpi: int = 150) -> None:
     fig.supylabel("Sensitivity (mean recall)", fontsize=11)
 
     # Legend: mutation types (color) + methods (markers)
-    mut_handles = [
-        mpatches.Patch(color=MUT_COLORS[m], label=m) for m in MUT_ORDER
-    ]
+    mut_handles = [mpatches.Patch(color=MUT_COLORS[m], label=m) for m in MUT_ORDER]
     method_handles = [
         Line2D(
             [0],

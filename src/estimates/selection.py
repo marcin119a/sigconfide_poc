@@ -1,6 +1,6 @@
 import numpy as np
-from sigconfide.estimates.standard import findSigExposures
 from sigconfide.decompose.qp import decomposeQP
+from sigconfide.estimates.standard import findSigExposures
 from sigconfide.utils.utils import is_wholenumber
 
 
@@ -27,7 +27,9 @@ def _p_values(exposures, threshold):
 
 
 def _evaluate(M, P, cols, threshold, decomposition_method):
-    exposures, _ = findSigExposures(M, P[:, cols], decomposition_method=decomposition_method)
+    exposures, _ = findSigExposures(
+        M, P[:, cols], decomposition_method=decomposition_method
+    )
     return _p_values(exposures, threshold)
 
 
@@ -69,10 +71,10 @@ def hybrid_stepwise_selection(
         m_norm = m / m.sum()
         init_exp = decomposition_method(m_norm, P)
         keep_mask = init_exp > pre_filter_threshold
-        for idx in _mandatory:          # mandatory sigs always survive pre-filter
+        for idx in _mandatory:  # mandatory sigs always survive pre-filter
             keep_mask[idx] = True
         keep = np.where(keep_mask)[0]
-        if len(keep) < 2:               # safety: need at least 2 sigs
+        if len(keep) < 2:  # safety: need at least 2 sigs
             keep = np.argsort(init_exp)[-2:]
         P = P[:, keep]
         N = P.shape[1]
@@ -97,15 +99,17 @@ def hybrid_stepwise_selection(
         # Backward: try removing one selected signature.
         # Mandatory signatures are protected — skip them.
         if len(selected) > 2:
-            pv = _evaluate(M, P, np.array(current_cols), threshold, decomposition_method)
+            pv = _evaluate(
+                M, P, np.array(current_cols), threshold, decomposition_method
+            )
             pv_map = {col: pv[i] for i, col in enumerate(current_cols)}
             for s in selected:
-                if s in mandatory_local:        # ← SPA-style: never evict
+                if s in mandatory_local:  # ← SPA-style: never evict
                     continue
                 benefit = pv_map[s] - significance_level
                 if benefit > best_benefit:
                     best_benefit = benefit
-                    best_move = ('remove', s)
+                    best_move = ("remove", s)
 
         # Forward: add one discarded signature
         for s in set(range(N)) - selected:
@@ -115,13 +119,13 @@ def hybrid_stepwise_selection(
             benefit = significance_level - pv[s_pos]
             if benefit > best_benefit:
                 best_benefit = benefit
-                best_move = ('add', s)
+                best_move = ("add", s)
 
         if best_move is None:
             break
 
         action, sig = best_move
-        if action == 'remove':
+        if action == "remove":
             selected.discard(sig)
         else:
             selected.add(sig)
@@ -129,7 +133,9 @@ def hybrid_stepwise_selection(
     local_indices = np.array(sorted(selected))
 
     # map back to original P column indices (identity when pre_filter disabled)
-    global_indices = keep[local_indices] if pre_filter_threshold is not None else local_indices
+    global_indices = (
+        keep[local_indices] if pre_filter_threshold is not None else local_indices
+    )
     exposures, errors = findSigExposures(
         m.reshape(-1, 1), P[:, local_indices], decomposition_method=decomposition_method
     )

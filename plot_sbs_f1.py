@@ -9,22 +9,21 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
+from matplotlib.lines import Line2D
 
 NOISE_PANELS = [
-    ("clean",   "No noise"),
-    ("noise5",  "5% noise"),
+    ("clean", "No noise"),
+    ("noise5", "5% noise"),
     ("noise10", "10% noise"),
 ]
 
 F1_LEVELS = [0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
-F1_COLOR  = "#aaaaaa"
+F1_COLOR = "#aaaaaa"
 
-SC_COLOR  = "#1f77b4"
+SC_COLOR = "#1f77b4"
 SPA_COLOR = "#ff7f0e"
 
 
@@ -41,46 +40,59 @@ def plot_sbs(csv_path: Path, out_path: Path, dpi: int = 150) -> None:
     sbs = df[df["mut_type"] == "SBS"].copy()
 
     fig, axes = plt.subplots(
-        1, 3,
+        1,
+        3,
         figsize=(11, 4.2),
         sharex=True,
         sharey=True,
         constrained_layout=True,
     )
 
-    p_grid = np.linspace(0.01, 1.0, 500)
-
     for ax, (noise_key, title) in zip(axes, NOISE_PANELS):
         # ── Data points ───────────────────────────────────────────────────────
         row = sbs[sbs["noise"] == noise_key].iloc[0]
 
         ax.scatter(
-            row["sc_mean_precision"], row["sc_mean_recall"],
-            c=SC_COLOR, marker="o", s=120, zorder=4,
-            edgecolors="white", linewidths=1.4,
+            row["sc_mean_precision"],
+            row["sc_mean_recall"],
+            c=SC_COLOR,
+            marker="o",
+            s=120,
+            zorder=4,
+            edgecolors="white",
+            linewidths=1.4,
             label="sigconfide",
         )
         ax.scatter(
-            row["spa_mean_precision"], row["spa_mean_recall"],
-            c=SPA_COLOR, marker="^", s=140, zorder=4,
-            edgecolors="white", linewidths=1.4,
+            row["spa_mean_precision"],
+            row["spa_mean_recall"],
+            c=SPA_COLOR,
+            marker="^",
+            s=140,
+            zorder=4,
+            edgecolors="white",
+            linewidths=1.4,
             label="SPA",
         )
 
         # Annotate F1 value next to each point
-        sc_f1  = row["sc_mean_f1"]
+        sc_f1 = row["sc_mean_f1"]
         spa_f1 = row["spa_mean_f1"]
         ax.annotate(
             f"F1={sc_f1:.3f}",
             xy=(row["sc_mean_precision"], row["sc_mean_recall"]),
-            xytext=(4, -10), textcoords="offset points",
-            fontsize=7.5, color=SC_COLOR,
+            xytext=(4, -10),
+            textcoords="offset points",
+            fontsize=7.5,
+            color=SC_COLOR,
         )
         ax.annotate(
             f"F1={spa_f1:.3f}",
             xy=(row["spa_mean_precision"], row["spa_mean_recall"]),
-            xytext=(4, 5), textcoords="offset points",
-            fontsize=7.5, color=SPA_COLOR,
+            xytext=(4, 5),
+            textcoords="offset points",
+            fontsize=7.5,
+            color=SPA_COLOR,
         )
 
         ax.set_title(title, fontsize=11)
@@ -88,8 +100,8 @@ def plot_sbs(csv_path: Path, out_path: Path, dpi: int = 150) -> None:
 
     # Axis limits
     all_p = pd.concat([sbs["sc_mean_precision"], sbs["spa_mean_precision"]])
-    all_r = pd.concat([sbs["sc_mean_recall"],    sbs["spa_mean_recall"]])
-    pad  = 0.03
+    all_r = pd.concat([sbs["sc_mean_recall"], sbs["spa_mean_recall"]])
+    pad = 0.03
     lo_x = max(0, all_p.min() - pad)
     hi_x = min(1, all_p.max() + pad)
     lo_y = max(0, all_r.min() - pad)
@@ -104,10 +116,26 @@ def plot_sbs(csv_path: Path, out_path: Path, dpi: int = 150) -> None:
 
     # Legend
     handles = [
-        Line2D([0], [0], marker="o", color="w", markerfacecolor=SC_COLOR,
-               markersize=9, markeredgecolor="white", label="sigconfide"),
-        Line2D([0], [0], marker="^", color="w", markerfacecolor=SPA_COLOR,
-               markersize=10, markeredgecolor="white", label="SPA"),
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            color="w",
+            markerfacecolor=SC_COLOR,
+            markersize=9,
+            markeredgecolor="white",
+            label="sigconfide",
+        ),
+        Line2D(
+            [0],
+            [0],
+            marker="^",
+            color="w",
+            markerfacecolor=SPA_COLOR,
+            markersize=10,
+            markeredgecolor="white",
+            label="SPA",
+        ),
     ]
     fig.legend(
         handles=handles,
@@ -123,9 +151,9 @@ def plot_sbs(csv_path: Path, out_path: Path, dpi: int = 150) -> None:
 
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--input",  type=Path, default=Path("compare_spa_summary.csv"))
+    p.add_argument("--input", type=Path, default=Path("compare_spa_summary.csv"))
     p.add_argument("--output", type=Path, default=Path("compare_spa_sbs_f1.png"))
-    p.add_argument("--dpi",    type=int,  default=150)
+    p.add_argument("--dpi", type=int, default=150)
     args = p.parse_args()
     plot_sbs(args.input, args.output, dpi=args.dpi)
 

@@ -32,3 +32,14 @@ packages = [
 "sigconfide.decompose"  = "src/decompose"
 "sigconfide.estimates"  = "src/estimates"
 "sigconfide.utils"      = "src/utils"
+
+[tool.black]
+line-length = 88
+target-version = ["py310"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
