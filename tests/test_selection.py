@@ -75,9 +75,7 @@ class TestHybridStepwiseSelection:
         weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
         m = self._counts(selection_panel, weights)
         np.random.seed(0)
-        sel_idx, exposures, errors = hybrid_stepwise_selection(
-            m, selection_panel, R=50
-        )
+        sel_idx, exposures, errors = hybrid_stepwise_selection(m, selection_panel, R=50)
         assert 0 in sel_idx
         assert 2 in sel_idx
 
@@ -85,9 +83,7 @@ class TestHybridStepwiseSelection:
         weights = np.array([0.5, 0.0, 0.5, 0.0, 0.0])
         m = self._counts(selection_panel, weights)
         np.random.seed(0)
-        sel_idx, exposures, errors = hybrid_stepwise_selection(
-            m, selection_panel, R=40
-        )
+        sel_idx, exposures, errors = hybrid_stepwise_selection(m, selection_panel, R=40)
         assert exposures.shape[0] == len(sel_idx)
         assert exposures.sum() == pytest.approx(1.0)
         assert errors.shape == (1,)

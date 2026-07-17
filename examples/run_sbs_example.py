@@ -38,22 +38,41 @@ SAMPLE_FILES = {
 }
 
 # ── sigconfide parameters ───────────────────────────────────────────────────
-R = 100                 # number of bootstrap replicates
-PRE_FILTER = 0.001      # drop trace signatures up front (None = disabled)
+R = 100  # number of bootstrap replicates
+PRE_FILTER = 0.001  # drop trace signatures up front (None = disabled)
 
 
 def parse_args():
     p = argparse.ArgumentParser(description="sigconfide example on SBS data")
-    p.add_argument("samples", nargs="*", default=None,
-                   help="Sample column name(s) (default: all, or --sample-index)")
-    p.add_argument("--sample-index", type=int, default=None,
-                   help="Run a single sample by column index")
-    p.add_argument("--max-samples", type=int, default=None,
-                   help="Limit the number of samples processed (for quick tests)")
-    p.add_argument("--noise", choices=list(SAMPLE_FILES), default="clean",
-                   help="Noise level of the input data (default clean)")
-    p.add_argument("--summary-only", action="store_true",
-                   help="Suppress per-sample output, print only the aggregate")
+    p.add_argument(
+        "samples",
+        nargs="*",
+        default=None,
+        help="Sample column name(s) (default: all, or --sample-index)",
+    )
+    p.add_argument(
+        "--sample-index",
+        type=int,
+        default=None,
+        help="Run a single sample by column index",
+    )
+    p.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Limit the number of samples processed (for quick tests)",
+    )
+    p.add_argument(
+        "--noise",
+        choices=list(SAMPLE_FILES),
+        default="clean",
+        help="Noise level of the input data (default clean)",
+    )
+    p.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Suppress per-sample output, print only the aggregate",
+    )
     return p.parse_args()
 
 
@@ -118,8 +137,7 @@ def process_sample(sample, samples, P, sig_names, gt, quiet=False):
         print(f"  missed:   {sorted(fn)}")
         print(f"  precision={prec:.3f}  recall={rec:.3f}  f1={f1:.3f}")
 
-    return dict(tp=len(tp), fp=len(fp), fn=len(fn),
-                precision=prec, recall=rec, f1=f1)
+    return dict(tp=len(tp), fp=len(fp), fn=len(fn), precision=prec, recall=rec, f1=f1)
 
 
 def print_summary(metrics, noise):
@@ -133,8 +151,7 @@ def print_summary(metrics, noise):
     micro_p = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     micro_r = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     micro_f = (
-        2 * micro_p * micro_r / (micro_p + micro_r)
-        if (micro_p + micro_r) > 0 else 0.0
+        2 * micro_p * micro_r / (micro_p + micro_r) if (micro_p + micro_r) > 0 else 0.0
     )
 
     print(f"\n── Summary over {len(df)} samples (noise: {noise}) ──")
@@ -143,8 +160,7 @@ def print_summary(metrics, noise):
         f"recall={df['recall'].mean():.3f}  f1={df['f1'].mean():.3f}"
     )
     print(
-        f"  micro  precision={micro_p:.3f}  "
-        f"recall={micro_r:.3f}  f1={micro_f:.3f}"
+        f"  micro  precision={micro_p:.3f}  " f"recall={micro_r:.3f}  f1={micro_f:.3f}"
     )
 
 
@@ -162,8 +178,8 @@ def main():
     cosmic = cosmic.loc[common_idx]
     samples = samples.loc[common_idx]
 
-    P = cosmic.values.astype(float)          # signature matrix (96 x N)
-    sig_names = np.array(cosmic.columns)     # signature names (SBS1, SBS2, ...)
+    P = cosmic.values.astype(float)  # signature matrix (96 x N)
+    sig_names = np.array(cosmic.columns)  # signature names (SBS1, SBS2, ...)
 
     # 2. Resolve which samples to run ---------------------------------------
     chosen = select_samples(args, samples.columns)
