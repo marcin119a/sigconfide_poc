@@ -1,5 +1,8 @@
 # sigconfide
 
+[![CI](https://github.com/marcin119a/sigconfide_poc/actions/workflows/ci.yml/badge.svg)](https://github.com/marcin119a/sigconfide_poc/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/marcin119a/sigconfide_poc/branch/main/graph/badge.svg)](https://codecov.io/gh/marcin119a/sigconfide_poc)
+
 **sigconfide** is a lightweight Python library for estimating mutational
 signature exposures and **selecting the active signatures** in a tumor sample.
 Fitting a mutational profile to a signature panel (e.g. COSMIC) is solved as a
