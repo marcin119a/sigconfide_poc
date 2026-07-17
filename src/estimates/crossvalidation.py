@@ -9,8 +9,8 @@ def crossValidationSigExposures(
     """
     Perform cross-validation to estimate signature exposures for a tumor sample.
 
-    This function performs cross-validation to estimate signature exposures for a specific tumor sample
-    using a specified decomposition method.
+    This function performs cross-validation to estimate signature exposures for
+    a specific tumor sample using a specified decomposition method.
 
     Parameters:
         m (numpy.ndarray): Observed tumor profile vector for a patient/sample.
@@ -19,22 +19,26 @@ def crossValidationSigExposures(
             where N is the number of signatures.
         fold_size (int): The number of cross-validation size.
         shuffle (bool): Change the order of mutations
-        decomposition_method (function, optional): The method selected to get the optimal solution.
-            It should be a function. Default is 'decomposeQP'.
+        decomposition_method (function, optional): The method selected to get the
+            optimal solution. It should be a function. Default is 'decomposeQP'.
 
     Returns:
         tuple: A tuple containing two numpy arrays.
-            - fold_exposures (numpy.ndarray): Matrix of signature exposures for each cross-validation fold (column).
-            - errors (numpy.ndarray): Estimation error for each fold (Frobenius norm).
+            - fold_exposures (numpy.ndarray): Matrix of signature exposures for
+              each cross-validation fold (column).
+            - errors (numpy.ndarray): Estimation error for each fold
+              (Frobenius norm).
 
     Raises:
-        ValueError: If the length of vector 'm' and the number of rows of matrix 'P' do not match,
-            if 'P' has less than 2 columns.
+        ValueError: If the length of vector 'm' and the number of rows of matrix
+            'P' do not match, if 'P' has less than 2 columns.
 
     Examples:
         num_folds = 5
         sigsBRCA = [1, 2, 3, 5, 6, 8, 13, 17, 18, 20, 26, 30]
-        fold_exposures, errors = crossValidationSigExposures(tumorBRCA[:, 1], signaturesCOSMIC[:, sigsBRCA], num_folds=5, decomposeQP)
+        fold_exposures, errors = crossValidationSigExposures(
+            tumorBRCA[:, 1], signaturesCOSMIC[:, sigsBRCA], num_folds=5, decomposeQP
+        )
     """
     # Process and check function parameters
     P = np.array(P)

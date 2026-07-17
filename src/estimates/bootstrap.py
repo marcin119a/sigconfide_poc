@@ -51,7 +51,8 @@ def bootstrapSigExposures(
         )
     if m.shape[0] != P.shape[0]:
         raise ValueError(
-            "Elements of vector 'm' and rows of matrix 'P' must have the same names (mutations types)."
+            "Elements of vector 'm' and rows of matrix 'P' must have the same "
+            "names (mutations types)."
         )
     if P.shape[1] == 1:
         raise ValueError("Matrices 'P' must have at least 2 columns (signatures).")
@@ -62,14 +63,15 @@ def bootstrapSigExposures(
             mutation_count = int(m.sum())
         else:
             raise ValueError(
-                "Please specify the parameter 'mutation_count' in the function call or provide mutation counts in parameter 'm'."
+                "Please specify the parameter 'mutation_count' in the function "
+                "call or provide mutation counts in parameter 'm'."
             )
 
     # Normalize m to be a vector of probabilities.
     m = m / np.sum(m)
 
-    # Find optimal solutions using provided decomposition method for each bootstrap replicate
-    # Matrix of signature exposures per replicate (column)
+    # Find optimal solutions using provided decomposition method for each
+    # bootstrap replicate. Matrix of signature exposures per replicate (column)
     K = len(m)  # number of mutation types
 
     def bootstrap_sample(m, mutation_count, K):
