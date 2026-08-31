@@ -43,6 +43,7 @@ def hybrid_stepwise_selection(
     decomposition_method=decomposeQP,
     pre_filter_threshold=None,
     mandatory_indices=None,
+    max_iterations=1000,
 ):
     """
     pre_filter_threshold : float or None
@@ -62,6 +63,15 @@ def hybrid_stepwise_selection(
           3. are skipped in the backward-removal step (cannot be evicted).
         Useful for biologically ubiquitous signatures (e.g. SBS1, SBS5).
         Default: None (disabled).
+
+    max_iterations : int
+        Hard cap on the number of add/remove moves, as a last-resort guard.
+        The greedy search is not monotone: on degenerate profiles (very low
+        mutation counts, where bootstrap p-values are coarse) a pair of moves
+        can undo each other, so the search would otherwise oscillate forever.
+        Visited active sets are therefore memoised and the loop stops as soon
+        as a move would revisit one; `max_iterations` only backs that up.
+        Default: 1000.
     """
     N = P.shape[1]
     _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
@@ -91,7 +101,13 @@ def hybrid_stepwise_selection(
     # we begin with the full set, but the backward step will never evict them).
     selected = set(range(N))
 
-    while True:
+    # Active sets already visited by the greedy search.  The search moves one
+    # signature at a time and can undo an earlier move, so without this the
+    # loop can cycle indefinitely (observed on profiles with a handful of
+    # mutations, where bootstrap p-values flip around the significance level).
+    visited = {frozenset(selected)}
+
+    for _ in range(max_iterations):
         best_benefit = 0.0
         best_move = None
         current_cols = sorted(selected)
@@ -125,10 +141,15 @@ def hybrid_stepwise_selection(
             break
 
         action, sig = best_move
-        if action == "remove":
-            selected.discard(sig)
-        else:
-            selected.add(sig)
+        candidate = selected - {sig} if action == "remove" else selected | {sig}
+        if frozenset(candidate) in visited:
+            # The best move would return the search to an active set it has
+            # already evaluated: the greedy walk is oscillating, so stop here
+            # and keep the current set rather than looping forever.
+            break
+
+        selected = candidate
+        visited.add(frozenset(selected))
 
     local_indices = np.array(sorted(selected))
 

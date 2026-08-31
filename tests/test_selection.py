@@ -126,3 +126,84 @@ class TestHybridStepwiseSelection:
         assert np.all(sel_idx < selection_panel.shape[1])
         # No duplicates and sorted ascending (as constructed in the function).
         assert len(set(sel_idx.tolist())) == len(sel_idx)
+
+
+class TestCycleGuard:
+    """The greedy add/remove walk must terminate even when moves undo each other.
+
+    A pair of signatures whose apparent significance depends on the presence of
+    the other makes the search oscillate:  {0,1,2,3} -> {0,1,3} -> {0,1} ->
+    {0,1,2} -> {0,1,2,3} -> ...  Before the visited-set guard this looped
+    forever, which is exactly what happened on real profiles carrying only a
+    handful of mutations (panel-sized breast catalogues).
+    """
+
+    @staticmethod
+    def _oscillating_decomposer(counter):
+        """QP stand-in whose exposures depend on which signatures are present.
+
+        Signature identity is read off the columns of the submatrix handed to
+        the decomposer (each column has a unique maximum row).
+        """
+
+        def decompose(m_col, P_sub):
+            counter["calls"] += 1
+            present = [int(np.argmax(P_sub[:, j])) for j in range(P_sub.shape[1])]
+            exposures = np.zeros(P_sub.shape[1])
+            for j, sig in enumerate(present):
+                if sig in (0, 1):  # always clearly significant
+                    exposures[j] = 0.4
+                elif sig == 2:  # significant only while 3 is absent
+                    exposures[j] = 0.0 if 3 in present else 0.2
+                elif sig == 3:  # significant only while 2 is present
+                    exposures[j] = 0.2 if 2 in present else 0.0
+            total = exposures.sum()
+            return exposures / total if total > 0 else exposures
+
+        return decompose
+
+    @pytest.fixture
+    def identity_panel(self):
+        P = np.eye(4) * 0.7 + 0.1
+        return P / P.sum(axis=0)
+
+    def test_terminates_on_oscillating_moves(self, identity_panel):
+        counter = {"calls": 0}
+        m = np.array([25.0, 25.0, 25.0, 25.0])
+        np.random.seed(0)
+        sel_idx, exposures, _ = hybrid_stepwise_selection(
+            m,
+            identity_panel,
+            R=5,
+            decomposition_method=self._oscillating_decomposer(counter),
+            max_iterations=50,
+        )
+        # Terminated by cycle detection, not by exhausting max_iterations:
+        # a cycling search would keep evaluating moves for all 50 iterations.
+        assert counter["calls"] < 200
+        assert set(sel_idx.tolist()) == {0, 1, 2}
+        assert exposures.sum() == pytest.approx(1.0)
+
+    def test_max_iterations_caps_the_search(self, identity_panel):
+        counter = {"calls": 0}
+        m = np.array([25.0, 25.0, 25.0, 25.0])
+        np.random.seed(0)
+        sel_idx, _, _ = hybrid_stepwise_selection(
+            m,
+            identity_panel,
+            R=5,
+            decomposition_method=self._oscillating_decomposer(counter),
+            max_iterations=1,
+        )
+        # One move only: signature 2 dropped from the initial full set.
+        assert set(sel_idx.tolist()) == {0, 1, 3}
+
+    def test_low_count_profile_terminates(self, selection_panel):
+        """A 3-mutation profile against the whole panel must still return."""
+        m = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0])
+        np.random.seed(7)
+        sel_idx, exposures, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=20, pre_filter_threshold=0.001
+        )
+        assert len(sel_idx) >= 2
+        assert exposures.sum() == pytest.approx(1.0)

@@ -174,8 +174,7 @@ multiprocessing, so a full run (2700 samples) takes a while — for a quick
 sanity check use `--max-samples`.
 
 ---
-
-## 6. Repository layout
+## 7. Repository layout
 
 ```
 src/
