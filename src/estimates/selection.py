@@ -158,12 +158,8 @@ def hybrid_stepwise_selection(
         channel, so on deep profiles any residual that a flat signature can
         absorb at more than `threshold` is "stable" and kept, whatever its
         cause; with `overdispersion` = sigma the replicates also carry a
-        sigma * c component, and a signature must survive that too.  0.1
-        matches the Diaz-Gay benchmark's noise rule (10% per channel); on
-        the 3600-tumour COSMIC v3.6 set (PCAWG_Benchmark/diazgay-v36) it
-        takes the SBS1/SBS5-forced arm's full-panel F1 at 10% noise from
-        0.838 to 0.931 (false calls 4276 -> 838) and costs 0.010 F1 on the
-        noiseless catalogues.  Default: None (plain multinomial).
+        sigma * c component, and a signature must survive that too. 
+        Default: None (plain multinomial).
     """
     N = P.shape[1]
     _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
