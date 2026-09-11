@@ -47,6 +47,38 @@ class TestBootstrapMatrix:
         M = _bootstrap_matrix(m_from_P, mutation_count=2000, R=4)
         assert M.shape == (len(m_from_P), 4)
 
+    def test_overdispersion_none_is_the_plain_bootstrap(self, counts_profile):
+        np.random.seed(0)
+        plain = _bootstrap_matrix(counts_profile, mutation_count=None, R=5)
+        np.random.seed(0)
+        explicit = _bootstrap_matrix(
+            counts_profile, mutation_count=None, R=5, overdispersion=None
+        )
+        assert np.array_equal(plain, explicit)
+
+    def test_overdispersion_widens_the_replicates(self):
+        """A deep profile: multinomial SD is sqrt(c), the gamma term adds sigma*c."""
+        rng = np.random.default_rng(0)
+        m = rng.poisson(2000, size=96).astype(float)
+        c = m / m.sum()
+        N = m.sum()
+        np.random.seed(0)
+        plain = _bootstrap_matrix(m, mutation_count=None, R=200)
+        np.random.seed(0)
+        wide = _bootstrap_matrix(m, mutation_count=None, R=200, overdispersion=0.1)
+        assert wide.sum(axis=0) == pytest.approx(np.ones(200))
+        sd_plain = plain.std(axis=1) / np.sqrt(c * (1 - c) / N)
+        sd_wide = wide.std(axis=1) / np.sqrt(c * (1 - c) / N + (0.1 * c) ** 2)
+        assert sd_plain.mean() == pytest.approx(1.0, abs=0.1)
+        assert sd_wide.mean() == pytest.approx(1.0, abs=0.1)
+        assert (wide.std(axis=1) > 2 * plain.std(axis=1)).all()
+
+    def test_negative_overdispersion_raises(self, counts_profile):
+        with pytest.raises(ValueError, match="overdispersion"):
+            _bootstrap_matrix(
+                counts_profile, mutation_count=None, R=2, overdispersion=-0.1
+            )
+
 
 @pytest.fixture
 def selection_panel():
@@ -126,6 +158,107 @@ class TestHybridStepwiseSelection:
         assert np.all(sel_idx < selection_panel.shape[1])
         # No duplicates and sorted ascending (as constructed in the function).
         assert len(set(sel_idx.tolist())) == len(sel_idx)
+
+
+class TestFitGainPruning:
+    """`min_fit_improvement` must evict signatures the reconstruction ignores.
+
+    The bootstrap criterion keeps any exposure that is stably above `threshold`,
+    which on deep profiles admits signatures that contribute nothing to the fit.
+    """
+
+    def _counts(self, P, weights, total=20000):
+        probs = P @ weights
+        return np.round(probs * total)
+
+    def _contaminated_counts(self, P, eps=0.06, total=40000):
+        """A 2-signature mix plus a component no column of P can represent.
+
+        This is the situation that makes the bootstrap over-select on real data:
+        the residual has to go somewhere, the flattest available signature
+        absorbs it at a stable few percent, and with enough mutations that
+        exposure clears `threshold` in every replicate.
+        """
+        contamination = np.array([0.10, 0.15, 0.15, 0.20, 0.20, 0.20])
+        contamination /= contamination.sum()
+        profile = (1 - eps) * (P @ np.array([0.6, 0.0, 0.4, 0.0, 0.0]))
+        profile += eps * contamination
+        return np.round(profile / profile.sum() * total)
+
+    def test_drops_signature_that_only_absorbs_residual(self, selection_panel):
+        m = self._contaminated_counts(selection_panel)
+        np.random.seed(0)
+        loose, _, _ = hybrid_stepwise_selection(m, selection_panel, R=40)
+        np.random.seed(0)
+        pruned, exposures, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, min_fit_improvement=0.002
+        )
+        # The bootstrap keeps the residual sponge; the fit-gain gate evicts it.
+        assert 4 in loose
+        assert set(pruned.tolist()) == {0, 2}
+        assert exposures.shape[0] == len(pruned)
+        assert exposures.sum() == pytest.approx(1.0)
+
+    def test_keeps_signatures_the_fit_needs(self, selection_panel):
+        # Every one of the three contributes a distinct, large component.
+        weights = np.array([0.4, 0.35, 0.25, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        pruned, _, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, min_fit_improvement=0.002
+        )
+        assert {0, 1, 2} <= set(pruned.tolist())
+
+    def test_mandatory_survives_pruning(self, selection_panel):
+        # Signature 4 contributes nothing to the fit but is protected.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        pruned, _, _ = hybrid_stepwise_selection(
+            m,
+            selection_panel,
+            R=40,
+            mandatory_indices=[4],
+            min_fit_improvement=0.5,  # aggressive enough to strip everything else
+        )
+        assert 4 in pruned
+
+    def test_never_falls_below_two_signatures(self, selection_panel):
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        pruned, exposures, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, min_fit_improvement=1.0
+        )
+        assert len(pruned) == 2
+        assert exposures.sum() == pytest.approx(1.0)
+
+    def test_disabled_by_default(self, selection_panel):
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        baseline, _, _ = hybrid_stepwise_selection(m, selection_panel, R=40)
+        np.random.seed(0)
+        explicit_off, _, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, min_fit_improvement=None
+        )
+        assert baseline.tolist() == explicit_off.tolist()
+
+    def test_indices_stay_global_with_pre_filter(self, selection_panel):
+        # Pruning happens in the filtered index space; the result must still be
+        # expressed in original P columns.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        pruned, _, _ = hybrid_stepwise_selection(
+            m,
+            selection_panel,
+            R=40,
+            pre_filter_threshold=0.001,
+            min_fit_improvement=0.002,
+        )
+        assert np.all((pruned >= 0) & (pruned < selection_panel.shape[1]))
+        assert {0, 2} <= set(pruned.tolist())
 
 
 class TestCycleGuard:

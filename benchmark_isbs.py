@@ -180,7 +180,7 @@ def score_sample(sample, m, true_exp, pred_exp, P, sig_names, seconds):
 # ── sigconfide worker (separate process) ──────────────────────────────────────
 def run_sample(args):
     (sample, m, true_exp, P, sig_names, r, pre_filter, mandatory_idx,
-     min_fit_gain) = args
+     min_fit_gain, overdispersion) = args
 
     t0 = time.time()
     if m.sum() <= 0:
@@ -194,6 +194,7 @@ def run_sample(args):
             pre_filter_threshold=pre_filter,
             mandatory_indices=list(mandatory_idx) or None,
             min_fit_improvement=min_fit_gain,
+            overdispersion=overdispersion,
         )
 
     pred_exp = np.zeros(P.shape[1])
@@ -260,6 +261,7 @@ def run_sigconfide(base, panel_path, gt_mode, noise, cfg):
             cfg["pre_filter"],
             mandatory_idx,
             cfg["min_fit_gain"],
+            cfg["overdispersion"],
         )
         for s in sample_ids
     ]
@@ -545,6 +547,13 @@ def parse_args():
         default=None,
         help="backward elimination on reconstruction cosine; 0.002 is validated",
     )
+    p.add_argument(
+        "--overdispersion",
+        type=float,
+        default=None,
+        help="per-channel CV of a gamma multiplier in the bootstrap; 0.1 matches"
+        " the benchmark's noise rule",
+    )
     p.add_argument("--workers", type=int, default=None)
     p.add_argument("--out-dir", default=None, help="default <benchmark-dir>/eval")
     p.add_argument(
@@ -579,6 +588,7 @@ def main():
         "pre_filter": args.pre_filter,
         "mandatory": args.mandatory,
         "min_fit_gain": args.min_fit_improvement,
+        "overdispersion": args.overdispersion,
         "max_samples": args.max_samples,
         "workers": args.workers,
     }
@@ -589,7 +599,8 @@ def main():
     if cfg["method"] == "sigconfide":
         print(f"settings  : R={cfg['R']} pre_filter={cfg['pre_filter']} "
               f"mandatory={cfg['mandatory'] or 'none'} "
-              f"min_fit_improvement={cfg['min_fit_gain']}")
+              f"min_fit_improvement={cfg['min_fit_gain']} "
+              f"overdispersion={cfg['overdispersion']}")
 
     per_sample, per_sig, burden, summaries = [], [], [], []
     t_global = time.time()
@@ -654,6 +665,7 @@ def main():
         "pre_filter_threshold": cfg["pre_filter"],
         "mandatory": cfg["mandatory"],
         "min_fit_improvement": cfg["min_fit_gain"],
+        "overdispersion": cfg["overdispersion"],
         "elapsed_s": round(total_elapsed, 1),
         "generation_manifest": (
             json.loads(manifest_path.read_text()) if manifest_path.exists() else None
