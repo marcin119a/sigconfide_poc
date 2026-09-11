@@ -67,10 +67,7 @@ def _prune_by_fit_gain(m_norm, P, cols, min_gain, protected, decomposition_metho
     signature earns its place in the fit.  On deep profiles the two come apart:
     bootstrap variance shrinks with the mutation count, so a signature parked at
     a few percent is stably above `threshold` in every replicate and is kept
-    even when removing it costs nothing.  Signatures with a flat profile absorb
-    whatever residual the rest of the panel leaves behind and are the usual
-    beneficiaries (SBS30 on breast WGS: called in 181/560 samples, median cost
-    of removal 0.002 cosine).
+    even when removing it costs nothing.
 
     Greedy backward elimination: repeatedly drop the signature whose removal
     costs the least reconstruction cosine, while that cost stays below
