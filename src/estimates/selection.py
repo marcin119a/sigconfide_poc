@@ -84,9 +84,7 @@ def _prune_by_fit_gain(m_norm, P, cols, min_gain, protected, decomposition_metho
             kept = [c for c in cols if c != s]
             if len(kept) < 2:
                 continue
-            cost = base - _reconstruction_cosine(
-                m_norm, P, kept, decomposition_method
-            )
+            cost = base - _reconstruction_cosine(m_norm, P, kept, decomposition_method)
             if worst_cost is None or cost < worst_cost:
                 worst, worst_cost = s, cost
         if worst is None or worst_cost >= min_gain:
@@ -155,7 +153,7 @@ def hybrid_stepwise_selection(
         channel, so on deep profiles any residual that a flat signature can
         absorb at more than `threshold` is "stable" and kept, whatever its
         cause; with `overdispersion` = sigma the replicates also carry a
-        sigma * c component, and a signature must survive that too. 
+        sigma * c component, and a signature must survive that too.
         Default: None (plain multinomial).
     """
     N = P.shape[1]
