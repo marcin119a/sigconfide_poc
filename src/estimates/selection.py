@@ -101,7 +101,7 @@ def hybrid_stepwise_selection(
     threshold=0.01,
     significance_level=0.05,
     decomposition_method=decomposeQP,
-    pre_filter_threshold=None,
+    pre_filter_threshold=0.001,
     mandatory_indices=None,
     max_iterations=1000,
     min_fit_improvement=None,
@@ -109,10 +109,11 @@ def hybrid_stepwise_selection(
 ):
     """
     pre_filter_threshold : float or None
-        If set, run a single cheap QP solve on the original profile first and
-        discard signatures whose exposure is below this value before entering
-        the bootstrap loop.  Recommended value: 0.001 (zero recall loss on
-        typical COSMIC data while reducing N ~4x).  Default: None (disabled).
+        If not None, run a single cheap QP solve on the original profile first
+        and discard signatures whose exposure is below this value before
+        entering the bootstrap loop.  The default 0.001 showed zero recall loss
+        on typical COSMIC data while reducing N ~4x.  Pass None to disable and
+        start the search from the full panel.  Default: 0.001.
 
     mandatory_indices : list of int or None
         Column indices in the original P that are treated as permanently

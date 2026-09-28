@@ -309,6 +309,7 @@ class TestCycleGuard:
             identity_panel,
             R=5,
             decomposition_method=self._oscillating_decomposer(counter),
+            pre_filter_threshold=None,  # the walk must start from the full panel
             max_iterations=50,
         )
         # Terminated by cycle detection, not by exhausting max_iterations:
@@ -326,6 +327,7 @@ class TestCycleGuard:
             identity_panel,
             R=5,
             decomposition_method=self._oscillating_decomposer(counter),
+            pre_filter_threshold=None,  # the walk must start from the full panel
             max_iterations=1,
         )
         # One move only: signature 2 dropped from the initial full set.

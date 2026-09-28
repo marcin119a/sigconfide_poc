@@ -1,5 +1,5 @@
 import numpy as np
-from sigconfide.decompose.qp import decomposeQP
+from sigconfide.decompose.qp import decomposeQP, decomposeQP_batch
 from sigconfide.utils.utils import FrobeniusNorm
 
 
@@ -59,7 +59,11 @@ def findSigExposures(M, P, decomposition_method=decomposeQP):
 
     # Find solutions
     # Matrix of signature exposures per sample/patient (column)
-    exposures = np.apply_along_axis(decomposition_method, 0, M, P)
+    if decomposition_method is decomposeQP:
+        # Default solver: build the QP set-up once for all columns.
+        exposures = decomposeQP_batch(M, P)
+    else:
+        exposures = np.apply_along_axis(decomposition_method, 0, M, P)
 
     # Compute estimation error for each sample/patient (Frobenius norm)
     errors = np.vectorize(lambda i: FrobeniusNorm(M[:, i], P, exposures[:, i]))(
