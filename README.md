@@ -79,7 +79,10 @@ Most important parameters:
   signatures before the bootstrap loop (~4× fewer signatures, no loss of sensitivity);
   pass `None` to disable it and search from the full panel,
 - `mandatory_indices` — indices of signatures that are always present (e.g. the ubiquitous
-  SBS1/SBS5) and are never removed.
+  SBS1/SBS5) and are never removed,
+- `rng` — source of the bootstrap draws: `None` (default) uses the global `np.random`, so
+  `np.random.seed` controls the result; an int, a `SeedSequence` or a `Generator` gives an
+  independent stream that leaves the global state alone. `bootstrapSigExposures` takes it too.
 
 For a runnable end-to-end example loading real COSMIC panels and sample data,
 see `results_sigconfide/examples/run_sbs_example.py` in the monorepo root.

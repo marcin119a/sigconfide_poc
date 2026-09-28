@@ -1,10 +1,10 @@
 import numpy as np
 from sigconfide.decompose.qp import decomposeQP
-from sigconfide.utils.utils import FrobeniusNorm, is_wholenumber
+from sigconfide.utils.utils import FrobeniusNorm, is_wholenumber, resolve_rng
 
 
 def bootstrapSigExposures(
-    m, P, R, mutation_count=None, decomposition_method=decomposeQP
+    m, P, R, mutation_count=None, decomposition_method=decomposeQP, rng=None
 ):
     """
     Obtain the bootstrap distribution of signature exposures for a tumor sample.
@@ -24,6 +24,11 @@ def bootstrapSigExposures(
             probabilities, 'mutation_count' must be specified.
         decomposition_method (function, optional): The method selected to get the
             optimal solution. It should be a function. Default is 'decomposeQP'.
+        rng (None, int, numpy.random.SeedSequence or numpy.random.Generator,
+            optional): Source of the bootstrap draws. None (default) uses the
+            global 'np.random', so 'np.random.seed' controls the result; anything
+            else goes through 'np.random.default_rng' and leaves the global
+            state alone.
 
     Returns:
         tuple: A tuple containing two numpy arrays.
@@ -72,18 +77,11 @@ def bootstrapSigExposures(
 
     # Find optimal solutions using provided decomposition method for each
     # bootstrap replicate. Matrix of signature exposures per replicate (column)
-    K = len(m)  # number of mutation types
+    # Channel counts of every replicate come straight from the multinomial.
+    counts = resolve_rng(rng).multinomial(mutation_count, m, size=R)
+    replicates = counts / mutation_count
 
-    def bootstrap_sample(m, mutation_count, K):
-        mutations_sampled = np.random.choice(K, size=mutation_count, p=m)
-        return np.bincount(mutations_sampled, minlength=K) / mutation_count
-
-    exposures = np.column_stack(
-        [
-            decomposition_method(bootstrap_sample(m, mutation_count, K), P)
-            for _ in range(R)
-        ]
-    )
+    exposures = np.column_stack([decomposition_method(r, P) for r in replicates])
     exposures = exposures / np.sum(exposures, axis=0)  # Normalize exposures
 
     # Compute estimation error for each replicate/trial (Frobenius norm)

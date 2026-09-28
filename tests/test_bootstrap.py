@@ -61,3 +61,34 @@ class TestBootstrapBehaviour:
         np.random.seed(7)
         exposures, _ = bootstrapSigExposures(counts_profile, simple_P, R=200)
         assert exposures.mean(axis=1) == pytest.approx(known_weights, abs=0.1)
+
+
+class TestBootstrapRng:
+    def test_same_seed_same_result(self, counts_profile, simple_P):
+        exp1, err1 = bootstrapSigExposures(counts_profile, simple_P, R=5, rng=42)
+        exp2, err2 = bootstrapSigExposures(counts_profile, simple_P, R=5, rng=42)
+        assert np.array_equal(exp1, exp2)
+        assert np.array_equal(err1, err2)
+
+    def test_different_seeds_differ(self, counts_profile, simple_P):
+        exp1, _ = bootstrapSigExposures(counts_profile, simple_P, R=5, rng=1)
+        exp2, _ = bootstrapSigExposures(counts_profile, simple_P, R=5, rng=2)
+        assert not np.array_equal(exp1, exp2)
+
+    def test_generator_object_is_accepted(self, counts_profile, simple_P):
+        by_int = bootstrapSigExposures(counts_profile, simple_P, R=5, rng=7)
+        by_gen = bootstrapSigExposures(
+            counts_profile, simple_P, R=5, rng=np.random.default_rng(7)
+        )
+        assert np.array_equal(by_int[0], by_gen[0])
+
+    def test_leaves_the_global_seed_alone(self, counts_profile, simple_P):
+        np.random.seed(3)
+        expected = np.random.random()
+        np.random.seed(3)
+        bootstrapSigExposures(counts_profile, simple_P, R=5, rng=0)
+        assert np.random.random() == expected
+
+    def test_recovers_signals_on_average(self, counts_profile, simple_P, known_weights):
+        exposures, _ = bootstrapSigExposures(counts_profile, simple_P, R=200, rng=7)
+        assert exposures.mean(axis=1) == pytest.approx(known_weights, abs=0.1)

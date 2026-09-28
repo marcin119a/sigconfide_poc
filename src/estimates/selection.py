@@ -1,10 +1,10 @@
 import numpy as np
 from sigconfide.decompose.qp import decomposeQP
 from sigconfide.estimates.standard import findSigExposures
-from sigconfide.utils.utils import is_wholenumber
+from sigconfide.utils.utils import is_wholenumber, resolve_rng
 
 
-def _bootstrap_matrix(m, mutation_count, R, overdispersion=None):
+def _bootstrap_matrix(m, mutation_count, R, overdispersion=None, rng=None):
     """R bootstrap replicates of the profile, as columns summing to 1.
 
     Plain multinomial resampling when `overdispersion` is None.  Otherwise each
@@ -13,8 +13,8 @@ def _bootstrap_matrix(m, mutation_count, R, overdispersion=None):
     multinomially from the scaled profile, so a channel holding c counts
     varies with SD sqrt(c + (overdispersion * c)^2) instead of sqrt(c): the
     multinomial term at low counts, the multiplicative one at high counts.
-    The plain path draws nothing extra, so seeded results are unchanged.
     """
+    rng = resolve_rng(rng)
     K = len(m)
     if mutation_count is None:
         if all(is_wholenumber(v) for v in m):
@@ -28,18 +28,15 @@ def _bootstrap_matrix(m, mutation_count, R, overdispersion=None):
         raise ValueError(
             "'overdispersion' must be a non-negative coefficient of variation."
         )
-    cols = []
-    for _ in range(R):
-        p = m
-        if overdispersion:
-            shape = 1.0 / overdispersion**2
-            p = m * np.random.gamma(shape, 1.0 / shape, size=K)
-            p = p / p.sum()
-        cols.append(
-            np.bincount(np.random.choice(K, size=mutation_count, p=p), minlength=K)
-            / mutation_count
-        )
-    return np.column_stack(cols)
+    if not overdispersion:
+        counts = rng.multinomial(mutation_count, m, size=R)
+    else:
+        shape = 1.0 / overdispersion**2
+        counts = np.empty((R, K))
+        for r in range(R):
+            p = m * rng.gamma(shape, 1.0 / shape, size=K)
+            counts[r] = rng.multinomial(mutation_count, p / p.sum())
+    return counts.T / mutation_count
 
 
 def _p_values(exposures, threshold):
@@ -106,6 +103,7 @@ def hybrid_stepwise_selection(
     max_iterations=1000,
     min_fit_improvement=None,
     overdispersion=None,
+    rng=None,
 ):
     """
     pre_filter_threshold : float or None
@@ -156,6 +154,15 @@ def hybrid_stepwise_selection(
         cause; with `overdispersion` = sigma the replicates also carry a
         sigma * c component, and a signature must survive that too.
         Default: None (plain multinomial).
+
+    rng : None, int, numpy.random.SeedSequence or numpy.random.Generator
+        Source of the bootstrap draws.  None uses the global `np.random`, so
+        `np.random.seed` controls the result.  Anything else goes through
+        `np.random.default_rng` and leaves the global state alone, which is
+        what a process pool needs: give each sample its own child of
+        `np.random.SeedSequence(seed).spawn(n_samples)` and the run is
+        reproducible whatever the worker count or scheduling.
+        Default: None.
     """
     N = P.shape[1]
     _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
@@ -180,7 +187,7 @@ def hybrid_stepwise_selection(
         mandatory_local = set(_mandatory)
     # ------------------------------------------------------------------------
 
-    M = _bootstrap_matrix(m, mutation_count, R, overdispersion)
+    M = _bootstrap_matrix(m, mutation_count, R, overdispersion, rng)
     # Mandatory sigs are in `selected` from the start (same as all others since
     # we begin with the full set, but the backward step will never evict them).
     selected = set(range(N))
