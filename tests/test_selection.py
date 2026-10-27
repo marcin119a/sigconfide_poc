@@ -4,6 +4,7 @@ from sigconfide.decompose.qp import decomposeQP
 from sigconfide.estimates.selection import (
     _bootstrap_matrix,
     _support,
+    estimate_overdispersion,
     hybrid_stepwise_selection,
 )
 
@@ -571,3 +572,140 @@ class TestDevianceSteps:
         off = hybrid_stepwise_selection(counts, simple_P, R=30, min_deviance_gain=None)
         assert sorted(default[0].tolist()) == sorted(explicit[0].tolist()) == [0, 2]
         assert len(off[0]) >= 2  # the plain search still runs with the step disabled
+
+
+class TestOverdispersionEstimate:
+    """`estimate_overdispersion`: sigma_b by the method of moments on the residual."""
+
+    @staticmethod
+    def _panel(K=96, N=6, seed=0):
+        rng = np.random.default_rng(seed)
+        P = rng.gamma(0.5, size=(K, N))  # peaked columns, like real signatures
+        return P / P.sum(axis=0)
+
+    weights = np.array([0.4, 0.3, 0.2, 0.1, 0.0, 0.0])
+
+    def test_exact_mixture_gives_zero(self):
+        P = self._panel()
+        counts = np.round(50000 * (P @ self.weights))
+        assert estimate_overdispersion(counts, P) == 0.0
+
+    def test_poisson_noise_stays_within_counting_noise(self):
+        """Residual inside the Poisson noise: the estimate is (close to) zero."""
+        P = self._panel()
+        rng = np.random.default_rng(1)
+        mu = 50000 * (P @ self.weights)
+        est = [
+            estimate_overdispersion(rng.poisson(mu).astype(float), P)
+            for _ in range(20)
+        ]
+        assert min(est) >= 0.0
+        assert max(est) < 0.03
+        assert np.mean(est) < 0.01
+
+    @pytest.mark.parametrize("sigma", [0.05, 0.10, 0.20])
+    def test_recovers_the_gamma_poisson_dispersion(self, sigma):
+        """Deep gamma-Poisson profile with CV `sigma` per channel: Var = c + (sigma c)^2."""
+        P = self._panel()
+        rng = np.random.default_rng(2)
+        mu = 200000 * (P @ self.weights)
+        est = []
+        for _ in range(20):
+            g = rng.gamma(sigma**-2, sigma**2, size=P.shape[0])
+            est.append(estimate_overdispersion(rng.poisson(mu * g).astype(float), P))
+        assert np.mean(est) == pytest.approx(sigma, abs=0.2 * sigma)
+
+    def test_sharpens_with_depth(self):
+        """Noisy at small n, precise at large n (where sigma_b matters)."""
+        P = self._panel()
+        rng = np.random.default_rng(3)
+        spread = {}
+        for n in (500, 200000):
+            mu = n * (P @ self.weights)
+            est = []
+            for _ in range(20):
+                g = rng.gamma(100.0, 0.01, size=P.shape[0])  # CV 0.10
+                est.append(estimate_overdispersion(rng.poisson(mu * g).astype(float), P))
+            spread[n] = np.std(est)
+        assert spread[200000] < spread[500] / 3
+
+    def test_fractional_profile_needs_the_mutation_count(self, m_from_P, simple_P):
+        with pytest.raises(ValueError, match="mutation_count"):
+            estimate_overdispersion(m_from_P, simple_P)
+
+    def test_fractional_with_count_matches_the_counts(self):
+        P = self._panel()
+        rng = np.random.default_rng(4)
+        g = rng.gamma(100.0, 0.01, size=P.shape[0])
+        counts = rng.poisson(100000 * (P @ self.weights) * g).astype(float)
+        n = int(counts.sum())
+        assert estimate_overdispersion(counts / n, P, mutation_count=n) == pytest.approx(
+            estimate_overdispersion(counts, P)
+        )
+
+
+class TestAutoOverdispersion:
+    """`overdispersion="auto"` plugs the estimate into the bootstrap."""
+
+    @staticmethod
+    def _noisy_counts(P, weights, n, sigma, seed):
+        rng = np.random.default_rng(seed)
+        g = rng.gamma(sigma**-2, sigma**2, size=P.shape[0])
+        return rng.poisson(n * (P @ weights) * g).astype(float)
+
+    def test_auto_matches_the_explicit_estimate(self):
+        P = TestOverdispersionEstimate._panel(N=8)
+        w = np.array([0.4, 0.3, 0.2, 0.1, 0, 0, 0, 0])
+        counts = self._noisy_counts(P, w, 100000, 0.10, seed=5)
+        sigma = estimate_overdispersion(counts, P)
+        assert sigma > 0.05
+        auto = hybrid_stepwise_selection(
+            counts, P, R=30, pre_filter_threshold=None, overdispersion="auto", rng=7
+        )
+        explicit = hybrid_stepwise_selection(
+            counts, P, R=30, pre_filter_threshold=None, overdispersion=sigma, rng=7
+        )
+        assert auto[0].tolist() == explicit[0].tolist()
+        assert auto[1] == pytest.approx(explicit[1])
+
+    def test_auto_on_a_clean_profile_is_the_multinomial_bootstrap(self, simple_P, counts_profile):
+        auto = hybrid_stepwise_selection(
+            counts_profile, simple_P, R=30, overdispersion="auto", rng=1
+        )
+        plain = hybrid_stepwise_selection(
+            counts_profile, simple_P, R=30, overdispersion=None, rng=1
+        )
+        assert auto[0].tolist() == plain[0].tolist()
+        assert auto[1] == pytest.approx(plain[1])
+
+    def test_auto_uses_the_pre_filtered_panel(self):
+        """With the pre-filter on, the estimate is taken against the kept columns."""
+        from sigconfide.decompose.qp import decomposeQP
+
+        P = TestOverdispersionEstimate._panel(N=8)
+        w = np.array([0.4, 0.3, 0.2, 0.1, 0, 0, 0, 0])
+        counts = self._noisy_counts(P, w, 100000, 0.10, seed=6)
+        keep = decomposeQP(counts / counts.sum(), P) > 0.001
+        sigma = estimate_overdispersion(counts, P[:, keep])
+        auto = hybrid_stepwise_selection(counts, P, R=30, overdispersion="auto", rng=2)
+        explicit = hybrid_stepwise_selection(counts, P, R=30, overdispersion=sigma, rng=2)
+        assert auto[0].tolist() == explicit[0].tolist()
+
+    def test_auto_recovers_the_mixture_on_a_deep_noisy_profile(self):
+        P = TestOverdispersionEstimate._panel(N=8)
+        w = np.array([0.4, 0.3, 0.2, 0.1, 0, 0, 0, 0])
+        counts = self._noisy_counts(P, w, 100000, 0.10, seed=8)
+        idx, expo, _ = hybrid_stepwise_selection(counts, P, R=50, overdispersion="auto", rng=3)
+        assert {0, 1, 2, 3} <= set(idx.tolist())
+        assert len(idx) <= 5
+
+    def test_fractional_profile_with_count_works(self, simple_P):
+        probs = simple_P @ np.array([0.6, 0.0, 0.4])
+        idx, _, _ = hybrid_stepwise_selection(
+            probs, simple_P, R=30, mutation_count=20000, overdispersion="auto", rng=4
+        )
+        assert sorted(idx.tolist()) == [0, 2]
+
+    def test_unknown_string_raises(self, simple_P, counts_profile):
+        with pytest.raises(ValueError, match="overdispersion"):
+            hybrid_stepwise_selection(counts_profile, simple_P, R=2, overdispersion="guess")

@@ -93,6 +93,14 @@ Most important parameters:
   the over-dispersion of the fit (`max(1, deviance/df)`), which leaves Poisson-or-quieter
   profiles unchanged and keeps the step meaningful on real catalogues, where the deviance
   per degree of freedom is typically 2--11,
+- `overdispersion` (default `None`) — over-dispersed bootstrap: each replicate first scales
+  every channel by a gamma factor with this coefficient of variation, so a channel with `c`
+  counts varies with SD `sqrt(c + (overdispersion * c)^2)` instead of `sqrt(c)`; on deep
+  profiles this stops flat signatures from surviving on a residual the multinomial
+  replicates cannot move. `"auto"` estimates it per sample from the residual of the fit
+  against the pre-filtered panel (method of moments on `Var = c + sigma^2 c^2`, see
+  `estimate_overdispersion`): it is 0, i.e. the plain multinomial bootstrap, when the
+  residual is within counting noise, and the excess dispersion of the catalogue otherwise,
 - `rng` — source of the bootstrap draws: `None` (default) uses the global `np.random`, so
   `np.random.seed` controls the result; an int, a `SeedSequence` or a `Generator` gives an
   independent stream that leaves the global state alone. `bootstrapSigExposures` takes it too.

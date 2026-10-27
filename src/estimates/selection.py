@@ -4,6 +4,17 @@ from sigconfide.estimates.standard import findSigExposures
 from sigconfide.utils.utils import is_wholenumber, resolve_rng
 
 
+def _mutation_count(m, mutation_count):
+    """The total mutation count: as given, or the sum of whole-number counts."""
+    if mutation_count is not None:
+        return mutation_count
+    if all(is_wholenumber(v) for v in m):
+        return int(m.sum())
+    raise ValueError(
+        "Specify 'mutation_count' or provide integer mutation counts in 'm'."
+    )
+
+
 def _bootstrap_matrix(m, mutation_count, R, overdispersion=None, rng=None):
     """R bootstrap replicates of the profile, as columns summing to 1.
 
@@ -16,13 +27,7 @@ def _bootstrap_matrix(m, mutation_count, R, overdispersion=None, rng=None):
     """
     rng = resolve_rng(rng)
     K = len(m)
-    if mutation_count is None:
-        if all(is_wholenumber(v) for v in m):
-            mutation_count = int(m.sum())
-        else:
-            raise ValueError(
-                "Specify 'mutation_count' or provide integer mutation counts in 'm'."
-            )
+    mutation_count = _mutation_count(m, mutation_count)
     m = m / m.sum()
     if overdispersion is not None and overdispersion < 0:
         raise ValueError(
@@ -92,11 +97,9 @@ def _prune_by_fit_gain(m_norm, P, cols, min_gain, protected, decomposition_metho
 
 
 def _as_counts(m, mutation_count):
-    """The profile as mutation counts, for the deviance-based steps."""
+    """The profile as mutation counts, for the residual-based steps."""
     m = np.asarray(m, dtype=float)
-    if mutation_count is None:
-        return m  # _bootstrap_matrix has already checked these are whole counts
-    return m / m.sum() * mutation_count
+    return m / m.sum() * _mutation_count(m, mutation_count)
 
 
 def _poisson_deviance(counts, mu):
@@ -111,6 +114,60 @@ def _deviance_of(counts, P, cols, decomposition_method):
     n = counts.sum()
     exposures = decomposition_method(counts / n, P[:, cols])
     return _poisson_deviance(counts, n * (P[:, cols] @ exposures))
+
+
+def estimate_overdispersion(
+    m, P, mutation_count=None, decomposition_method=decomposeQP
+) -> float:
+    """Estimate the bootstrap over-dispersion ``sigma_b`` from the fit residual.
+
+    The over-dispersed bootstrap varies a channel with expected count ``c``
+    by ``Var = c + (sigma_b c)^2``, which is linear in ``sigma_b^2``, so the
+    residual of a fit gives ``sigma_b`` by the method of moments (the classic
+    negative-binomial dispersion estimator).  With ``c_k = n (P e)_k`` the
+    fitted counts of the QP solution against all ``p`` columns of ``P`` and
+    ``d_k = X_k - c_k`` the residuals,
+
+        sigma_b^2 = max{ 0, ( K/(K-p) * sum d_k^2 - sum c_k ) / sum c_k^2 }.
+
+    The part of the residual that counting noise explains (``sum c_k``) is
+    taken out and the rest is normalised by ``sum c_k^2``; ``K/(K-p)`` is
+    the degrees-of-freedom correction for the fitted parameters.  A residual
+    within Poisson noise gives 0, which recovers the plain multinomial
+    bootstrap.
+
+    The estimate is noisy at small ``n``, but there the ``sqrt(c)`` term
+    dominates the replicates and ``sigma_b`` hardly matters.  At large ``n``,
+    where ``sigma_b`` decides whether flat signatures survive, ``sum c_k^2``
+    is large and the estimate is precise.
+
+    Args:
+        m (numpy.ndarray): Profile of one sample, shape ``(K,)``; counts or
+            probabilities.
+        P (numpy.ndarray): The panel to fit, shape ``(K, p)``: the active set
+            the residual is taken against. ``hybrid_stepwise_selection``
+            passes the pre-filtered panel (the most saturated model, so the
+            estimate carries as little misfit as possible).
+        mutation_count (int, optional): Total number of mutations. Required
+            when ``m`` does not hold integer counts.
+        decomposition_method (callable): Solver ``f(m, P) -> exposures``.
+            Default ``decomposeQP``.
+
+    Returns:
+        float: ``sigma_b``, a non-negative coefficient of variation.
+    """
+    counts = _as_counts(m, mutation_count)
+    n = counts.sum()
+    K, p = P.shape
+    exposures = decomposition_method(counts / n, P)
+    c = n * (P @ exposures)
+    d = counts - c
+    scale = np.sum(c**2)
+    if scale <= 0:
+        return 0.0
+    df = max(1, K - p)
+    sigma2 = (K / df * np.sum(d**2) - np.sum(c)) / scale
+    return float(np.sqrt(max(0.0, sigma2)))
 
 
 def _swap_by_deviance(
@@ -240,11 +297,16 @@ def hybrid_stepwise_selection(
             whether an exposure is stable; this asks whether it is needed.
             0.002 was validated on ICGC-BRCA (mean MCC 0.51 -> 0.63).
             Mandatory signatures are exempt. None disables it.
-        overdispersion (float | None): Coefficient of variation of a per-channel
-            gamma multiplier applied before every bootstrap draw (see
-            ``_bootstrap_matrix``), so a channel with ``c`` counts varies with
-            SD ``sqrt(c + (overdispersion * c)^2)``. Prevents flat signatures
-            from surviving on deep profiles. None means plain multinomial.
+        overdispersion (float | "auto" | None): Coefficient of variation of a
+            per-channel gamma multiplier applied before every bootstrap draw
+            (see ``_bootstrap_matrix``), so a channel with ``c`` counts varies
+            with SD ``sqrt(c + (overdispersion * c)^2)``. Prevents flat
+            signatures from surviving on deep profiles. ``"auto"`` estimates
+            it from the residual of the fit against the pre-filtered panel
+            by the method of moments (see ``estimate_overdispersion``): 0,
+            and hence the plain multinomial bootstrap, when the residual is
+            within counting noise, the excess dispersion of the catalogue
+            otherwise. None means plain multinomial.
         min_deviance_gain (float | None): If set, follow the search with two
             steps scored by the Poisson deviance of the fit, both using this
             margin: a swap step that replaces an active signature by an
@@ -309,6 +371,14 @@ def hybrid_stepwise_selection(
         mandatory_local = set(_mandatory)
     # ------------------------------------------------------------------------
 
+    if isinstance(overdispersion, str):
+        if overdispersion != "auto":
+            raise ValueError(
+                "'overdispersion' must be a non-negative number, 'auto' or None."
+            )
+        overdispersion = estimate_overdispersion(
+            m, P, mutation_count, decomposition_method
+        )
     M = _bootstrap_matrix(m, mutation_count, R, overdispersion, rng)
     # Mandatory sigs are in `selected` from the start (same as all others since
     # we begin with the full set, but the backward step will never evict them).
