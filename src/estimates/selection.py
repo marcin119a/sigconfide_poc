@@ -56,46 +56,6 @@ def _evaluate(M, P, cols, threshold, decomposition_method):
     return _support(exposures, threshold)
 
 
-def _reconstruction_cosine(m_norm, P, cols, decomposition_method):
-    exposures = decomposition_method(m_norm, P[:, cols])
-    reconstruction = P[:, cols] @ exposures
-    denom = np.linalg.norm(m_norm) * np.linalg.norm(reconstruction)
-    return float(m_norm @ reconstruction / denom) if denom > 0 else 0.0
-
-
-def _prune_by_fit_gain(m_norm, P, cols, min_gain, protected, decomposition_method):
-    """Drop signatures that the reconstruction does not actually need.
-
-    The bootstrap support measures how *stable* an exposure is, not whether the
-    signature earns its place in the fit.  On deep profiles the two come apart:
-    bootstrap variance shrinks with the mutation count, so a signature parked at
-    a few percent is stably above `threshold` in every replicate and is kept
-    even when removing it costs nothing.
-
-    Greedy backward elimination: repeatedly drop the signature whose removal
-    costs the least reconstruction cosine, while that cost stays below
-    `min_gain`.  Protected (mandatory) signatures are never dropped and at least
-    two signatures always survive.
-    """
-    cols = list(cols)
-    while len(cols) > 2:
-        base = _reconstruction_cosine(m_norm, P, cols, decomposition_method)
-        worst, worst_cost = None, None
-        for s in cols:
-            if s in protected:
-                continue
-            kept = [c for c in cols if c != s]
-            if len(kept) < 2:
-                continue
-            cost = base - _reconstruction_cosine(m_norm, P, kept, decomposition_method)
-            if worst_cost is None or cost < worst_cost:
-                worst, worst_cost = s, cost
-        if worst is None or worst_cost >= min_gain:
-            break
-        cols.remove(worst)
-    return cols
-
-
 def _as_counts(m, mutation_count):
     """The profile as mutation counts, for the residual-based steps."""
     m = np.asarray(m, dtype=float)
@@ -213,11 +173,13 @@ def _swap_by_deviance(
 def _prune_by_deviance(counts, P, cols, min_gain, protected, decomposition_method):
     """Backward elimination on Poisson deviance.
 
-    Same loop as `_prune_by_fit_gain`, but the cost of dropping a signature is
-    the rise in Poisson deviance rather than the loss of reconstruction
-    cosine.  The cosine is dominated by the high-count channels, so a peaked
-    signature carrying a few percent of the profile costs as little as a flat
-    one parked on the residual; the deviance weights every channel by its
+    Greedy loop: repeatedly drop the signature whose removal raises the
+    Poisson deviance least, while that rise stays below `min_gain`.
+    Protected (mandatory) signatures are never dropped and at least two
+    signatures always survive.  A reconstruction error such as the cosine
+    similarity is dominated by the high-count channels, so a peaked signature
+    carrying a few percent of the profile costs as little as a flat one
+    parked on the residual; the deviance weights every channel by its
     expected count and tells the two apart.  A negative cost (dropping the
     signature *lowers* the deviance, which the least-squares QP solution
     allows) always prunes.
@@ -250,7 +212,6 @@ def hybrid_stepwise_selection(
     pre_filter_threshold=0.001,
     mandatory_indices=None,
     max_iterations=1000,
-    min_fit_improvement=None,
     overdispersion=None,
     min_deviance_gain=5.0,
     dispersion_scaled=True,
@@ -291,12 +252,6 @@ def hybrid_stepwise_selection(
             signatures such as SBS1 and SBS5.
         max_iterations (int): Hard cap on add/remove moves, a last-resort guard
             against oscillation on degenerate low-count profiles. Default 1000.
-        min_fit_improvement (float | None): If set, follow the search with a
-            backward elimination that drops any signature whose removal costs
-            less than this much reconstruction cosine. The bootstrap asks
-            whether an exposure is stable; this asks whether it is needed.
-            0.002 was validated on ICGC-BRCA (mean MCC 0.51 -> 0.63).
-            Mandatory signatures are exempt. None disables it.
         overdispersion (float | "auto" | None): Coefficient of variation of a
             per-channel gamma multiplier applied before every bootstrap draw
             (see ``_bootstrap_matrix``), so a channel with ``c`` counts varies
@@ -314,14 +269,12 @@ def hybrid_stepwise_selection(
             margin, then a backward elimination that drops any signature
             whose removal raises the deviance by less than it. The bootstrap
             asks whether an exposure is stable; this asks whether the
-            signature is needed, and unlike ``min_fit_improvement`` it
-            weights every channel by its expected count, so a peaked
-            signature at a few percent of the profile is kept while a flat
-            one parked on the residual is not. 5 (the chi-square scale, one
+            signature is needed, and it weights every channel by its
+            expected count, so a peaked signature at a few percent of the
+            profile is kept while a flat one parked on the residual is not. 5 (the chi-square scale, one
             degree of freedom) was validated on the in-silico breast
             benchmark and is the default. Mandatory signatures are exempt.
-            Runs before ``min_fit_improvement`` when both are set. None
-            disables it and recovers the plain bootstrap search.
+            None disables it and recovers the plain bootstrap search.
         dispersion_scaled (bool): Put ``min_deviance_gain`` on the
             quasi-likelihood scale: the margin is multiplied by the dispersion
             ``max(1, deviance / (K - N))`` of the fit against the whole
@@ -450,18 +403,6 @@ def hybrid_stepwise_selection(
         selected = set(
             _prune_by_deviance(
                 counts, P, sorted(selected), margin, mandatory_local,
-                decomposition_method,
-            )
-        )
-
-    if min_fit_improvement is not None:
-        selected = set(
-            _prune_by_fit_gain(
-                m / m.sum(),
-                P,
-                sorted(selected),
-                min_fit_improvement,
-                mandatory_local,
                 decomposition_method,
             )
         )
