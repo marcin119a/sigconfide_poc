@@ -201,6 +201,35 @@ def _prune_by_deviance(counts, P, cols, min_gain, protected, decomposition_metho
     return cols
 
 
+def _apply_mandatory_floor(
+    m, P, cols, exposures, errors, protected, floor, decomposition_method
+):
+    """Drop forced signatures whose final relative exposure is below `floor`.
+
+    A mandatory signature is carried through the search unconditionally so
+    that a trace of it is fitted at all and a look-alike cannot stand in for
+    it; this last step asks whether the fit actually used it.  One column at
+    a time, the smallest exposure first, refitting after each removal because
+    the remaining exposures shift; at least two signatures always survive.
+    """
+    cols = np.asarray(cols)
+    while len(cols) > 2:
+        below = [
+            (exposures[i], i)
+            for i, c in enumerate(cols)
+            if c in protected and exposures[i] < floor
+        ]
+        if not below:
+            break
+        _, i_drop = min(below)
+        cols = np.delete(cols, i_drop)
+        exposures, errors = findSigExposures(
+            m.reshape(-1, 1), P[:, cols], decomposition_method=decomposition_method
+        )
+        exposures = exposures.flatten()
+    return cols, exposures, errors
+
+
 def hybrid_stepwise_selection(
     m,
     P,
@@ -215,6 +244,7 @@ def hybrid_stepwise_selection(
     overdispersion=None,
     min_deviance_gain=5.0,
     dispersion_scaled=True,
+    mandatory_floor=0.002,
     rng=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Select the active signatures of one sample with a bootstrap stepwise search.
@@ -271,21 +301,26 @@ def hybrid_stepwise_selection(
             asks whether an exposure is stable; this asks whether the
             signature is needed, and it weights every channel by its
             expected count, so a peaked signature at a few percent of the
-            profile is kept while a flat one parked on the residual is not. 5 (the chi-square scale, one
-            degree of freedom) was validated on the in-silico breast
-            benchmark and is the default. Mandatory signatures are exempt.
+            profile is kept while a flat one parked on the residual is not. 5.
             None disables it and recovers the plain bootstrap search.
         dispersion_scaled (bool): Put ``min_deviance_gain`` on the
             quasi-likelihood scale: the margin is multiplied by the dispersion
             ``max(1, deviance / (K - N))`` of the fit against the whole
             pre-filtered panel (the most saturated model, so the estimate
             carries as little misfit as possible). Real catalogues are
-            over-dispersed relative to Poisson (deviance per degree of freedom
-            of 2--11 on breast whole genomes against 0--0.4 on the synthetic
-            benchmarks), and an unscaled margin that filters the latter is a
-            no-op on the former. The floor at 1 leaves Poisson-or-quieter
-            profiles exactly as with ``dispersion_scaled=False``. Default
+            over-dispersed relative to Poisson and an unscaled margin that
+            filters the latter is a no-op on the former. The floor at 1 
+            leaves Poisson-or-quieter profiles exactly as with ``dispersion_scaled=False``.
+            Default
             True.
+        mandatory_floor (float | None): Relative exposure below which a
+            mandatory signature is dropped from the final answer. The
+            mandatory set is carried through the search unconditionally, so
+            that a trace of SBS1 is fitted at all and a look-alike cannot
+            stand in for SBS5; this last step then asks whether the final fit
+            actually used the forced column. Columns below the floor are
+            removed one at a time, the smallest first, with a refit after
+            each, and at least two signatures always survive. Default 0.002:.
         rng (None | int | SeedSequence | Generator): Source of the bootstrap
             draws. None uses the global ``np.random``. Anything else goes
             through ``np.random.default_rng`` and leaves the global state alone;
@@ -408,12 +443,19 @@ def hybrid_stepwise_selection(
         )
 
     local_indices = np.array(sorted(selected))
+    exposures, errors = findSigExposures(
+        m.reshape(-1, 1), P[:, local_indices], decomposition_method=decomposition_method
+    )
+    exposures = exposures.flatten()
+
+    if mandatory_floor is not None and mandatory_local:
+        local_indices, exposures, errors = _apply_mandatory_floor(
+            m, P, local_indices, exposures, errors, mandatory_local,
+            mandatory_floor, decomposition_method,
+        )
 
     # map back to original P column indices (identity when pre_filter disabled)
     global_indices = (
         keep[local_indices] if pre_filter_threshold is not None else local_indices
     )
-    exposures, errors = findSigExposures(
-        m.reshape(-1, 1), P[:, local_indices], decomposition_method=decomposition_method
-    )
-    return global_indices, exposures.flatten(), errors
+    return global_indices, exposures, errors

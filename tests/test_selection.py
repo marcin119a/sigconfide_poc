@@ -205,7 +205,7 @@ class TestHybridStepwiseSelection:
         m = self._counts(selection_panel, weights)
         np.random.seed(0)
         sel_idx, _, _ = hybrid_stepwise_selection(
-            m, selection_panel, R=40, mandatory_indices=[4]
+            m, selection_panel, R=40, mandatory_indices=[4], mandatory_floor=None
         )
         assert 4 in sel_idx
 
@@ -221,8 +221,75 @@ class TestHybridStepwiseSelection:
             R=40,
             pre_filter_threshold=0.05,
             mandatory_indices=[4],
+            mandatory_floor=None,
         )
         assert 4 in sel_idx
+
+    def test_mandatory_floor_default_is_0002(self):
+        import inspect
+
+        params = inspect.signature(hybrid_stepwise_selection).parameters
+        assert params["mandatory_floor"].default == 0.002
+
+    def test_mandatory_floor_default_drops_unused_forced_signature(self, selection_panel):
+        # Same profile as test_mandatory_indices_always_present, package default.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, _, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, mandatory_indices=[4]
+        )
+        assert 4 not in sel_idx
+
+    def test_mandatory_floor_drops_unused_forced_signature(self, selection_panel):
+        # Signature 4 is absent and forced; with a floor the final fit may let
+        # it go, because its exposure is (near) zero.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, exposures, errors = hybrid_stepwise_selection(
+            m, selection_panel, R=40, mandatory_indices=[4], mandatory_floor=0.01
+        )
+        assert 4 not in sel_idx
+        assert set(sel_idx) == {0, 2}
+        assert exposures.shape[0] == len(sel_idx)
+        assert exposures.sum() == pytest.approx(1.0)
+        assert errors.shape == (1,)
+
+    def test_mandatory_floor_keeps_used_forced_signature(self, selection_panel):
+        # Signature 4 is forced AND really present well above the floor.
+        weights = np.array([0.5, 0.0, 0.3, 0.0, 0.2])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, exposures, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, mandatory_indices=[4], mandatory_floor=0.01
+        )
+        assert 4 in sel_idx
+        assert exposures[list(sel_idx).index(4)] > 0.01
+
+    def test_mandatory_floor_keeps_at_least_two(self, selection_panel):
+        # Only the two forced signatures survive the search and one is unused:
+        # the floor never empties the set below two signatures.
+        weights = np.array([0.0, 0.0, 0.0, 1.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, exposures, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, mandatory_indices=[3, 4],
+            pre_filter_threshold=0.5, mandatory_floor=0.01,
+        )
+        assert len(sel_idx) >= 2
+        assert 3 in sel_idx
+        assert exposures.sum() == pytest.approx(1.0)
+
+    def test_mandatory_floor_without_mandatory_set_is_a_no_op(self, selection_panel):
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        a = hybrid_stepwise_selection(m, selection_panel, R=40)
+        np.random.seed(0)
+        b = hybrid_stepwise_selection(m, selection_panel, R=40, mandatory_floor=None)
+        assert list(a[0]) == list(b[0])
+        np.testing.assert_allclose(a[1], b[1])
 
     def test_indices_map_to_original_columns(self, selection_panel):
         # With pre-filter on, returned indices must reference the ORIGINAL P

@@ -81,7 +81,16 @@ Most important parameters:
   signatures before the bootstrap loop (~4× fewer signatures, no loss of sensitivity);
   pass `None` to disable it and search from the full panel,
 - `mandatory_indices` — indices of signatures that are always present (e.g. the ubiquitous
-  SBS1/SBS5) and are never removed,
+  SBS1/SBS5) and are never removed by the search,
+- `mandatory_floor` (default `0.002`) — relative exposure below which a mandatory signature
+  is dropped from the final answer after the search and the deviance steps. The forced
+  signature is still carried through the search, so a trace of SBS1 gets fitted at all and
+  a look-alike cannot stand in for SBS5; the floor only asks whether the final fit used it.
+  Columns below it go one at a time, smallest first, with a refit after each; at least two
+  signatures survive. On the synthetic benchmarks a forced SBS1/SBS5 the profile does not
+  use ends at a median 0.01--0.09% of the profile and the true traces the set rescues at
+  about 0.5%; `0.002` was the largest floor that cost nothing where the set helps. `None`
+  keeps every mandatory signature whatever its exposure,
 - `min_deviance_gain` (default `5`) — after the bootstrap search, a swap step and a
   backward elimination scored by the Poisson deviance of the fit: an active signature is
   replaced by an inactive one when that lowers the deviance by more than this margin, and
