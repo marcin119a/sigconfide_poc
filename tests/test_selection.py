@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from sigconfide.decompose.qp import decomposeQP
 from sigconfide.estimates.selection import (
     _bootstrap_matrix,
     _support,
@@ -425,7 +426,8 @@ class TestCycleGuard:
             identity_panel,
             R=5,
             decomposition_method=self._oscillating_decomposer(counter),
-            pre_filter_threshold=None,  # the walk must start from the full panel
+            pre_filter_threshold=None,
+            min_deviance_gain=None,  # these tests exercise the greedy walk alone  # the walk must start from the full panel
             max_iterations=50,
         )
         # Terminated by cycle detection, not by exhausting max_iterations:
@@ -443,7 +445,8 @@ class TestCycleGuard:
             identity_panel,
             R=5,
             decomposition_method=self._oscillating_decomposer(counter),
-            pre_filter_threshold=None,  # the walk must start from the full panel
+            pre_filter_threshold=None,
+            min_deviance_gain=None,  # these tests exercise the greedy walk alone  # the walk must start from the full panel
             max_iterations=1,
         )
         # One move only: signature 2 dropped from the initial full set.
@@ -458,3 +461,113 @@ class TestCycleGuard:
         )
         assert len(sel_idx) >= 2
         assert exposures.sum() == pytest.approx(1.0)
+
+
+class TestDevianceSteps:
+    """`min_deviance_gain`: deviance-scored swap and backward elimination."""
+
+    @staticmethod
+    def _counts(P, weights, total=20000):
+        return np.round(total * (P @ weights))
+
+    def test_poisson_deviance_is_zero_at_the_data_and_positive_elsewhere(self):
+        from sigconfide.estimates.selection import _poisson_deviance
+
+        x = np.array([10.0, 0.0, 25.0, 5.0])
+        assert _poisson_deviance(x, x) == pytest.approx(0.0, abs=1e-2)
+        assert _poisson_deviance(x, x * 1.3) > 0
+        assert _poisson_deviance(x, np.array([10.0, 3.0, 25.0, 5.0])) > 0
+
+    def test_swap_brings_back_the_generating_signature(self, simple_P):
+        from sigconfide.estimates.selection import _swap_by_deviance
+
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        got = _swap_by_deviance(counts, simple_P, [1, 2], 5.0, set(), decomposeQP)
+        assert got == [0, 2]
+
+    def test_swap_never_touches_a_protected_signature(self, simple_P):
+        from sigconfide.estimates.selection import _swap_by_deviance
+
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        got = _swap_by_deviance(counts, simple_P, [1, 2], 5.0, {1}, decomposeQP)
+        assert 1 in got  # the spurious column is protected, so it stays
+        assert got == [0, 1]  # and the swap replaces the other one instead
+
+    def test_swap_keeps_a_set_that_already_fits(self, simple_P, known_weights):
+        from sigconfide.estimates.selection import _swap_by_deviance
+
+        counts = self._counts(simple_P, known_weights)
+        got = _swap_by_deviance(counts, simple_P, [0, 1, 2], 5.0, set(), decomposeQP)
+        assert got == [0, 1, 2]
+
+    def test_prune_drops_an_unneeded_signature_and_keeps_the_needed(self, simple_P):
+        from sigconfide.estimates.selection import _prune_by_deviance
+
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        got = _prune_by_deviance(counts, simple_P, [0, 1, 2], 5.0, set(), decomposeQP)
+        assert got == [0, 2]
+
+    def test_prune_respects_protection_and_the_two_signature_floor(self, simple_P):
+        from sigconfide.estimates.selection import _prune_by_deviance
+
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        assert _prune_by_deviance(counts, simple_P, [0, 1, 2], 5.0, {1}, decomposeQP) == [0, 1, 2]
+        assert _prune_by_deviance(counts, simple_P, [1, 2], 1e9, set(), decomposeQP) == [1, 2]
+
+    def test_selection_with_the_option_recovers_the_mixture(self, simple_P, known_weights, counts_profile):
+        np.random.seed(0)
+        idx, expo, _ = hybrid_stepwise_selection(
+            counts_profile, simple_P, R=30, min_deviance_gain=5.0
+        )
+        assert sorted(idx.tolist()) == [0, 1, 2]
+        assert expo == pytest.approx(known_weights, abs=0.02)
+
+    def test_selection_with_the_option_drops_a_spurious_column(self, simple_P):
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        np.random.seed(0)
+        idx, _, _ = hybrid_stepwise_selection(counts, simple_P, R=30, min_deviance_gain=5.0)
+        assert sorted(idx.tolist()) == [0, 2]
+
+    def test_fractional_profile_uses_the_mutation_count(self, simple_P):
+        probs = simple_P @ np.array([0.6, 0.0, 0.4])
+        np.random.seed(0)
+        idx, _, _ = hybrid_stepwise_selection(
+            probs, simple_P, R=30, mutation_count=20000, min_deviance_gain=5.0
+        )
+        assert sorted(idx.tolist()) == [0, 2]
+
+    def test_negative_margin_raises(self, counts_profile, simple_P):
+        with pytest.raises(ValueError, match="min_deviance_gain"):
+            hybrid_stepwise_selection(counts_profile, simple_P, R=2, min_deviance_gain=-1.0)
+
+    def test_dispersion_scaling_is_a_no_op_on_poisson_or_quieter_data(self, simple_P):
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        np.random.seed(0)
+        a = hybrid_stepwise_selection(counts, simple_P, R=30, min_deviance_gain=5.0)
+        np.random.seed(0)
+        b = hybrid_stepwise_selection(
+            counts, simple_P, R=30, min_deviance_gain=5.0, dispersion_scaled=True
+        )
+        assert sorted(a[0].tolist()) == sorted(b[0].tolist()) == [0, 2]
+
+    def test_dispersion_scaling_raises_the_margin_on_noisy_data(self, simple_P):
+        from sigconfide.estimates.selection import _deviance_of
+
+        rng = np.random.default_rng(3)
+        clean = 20000 * (simple_P @ np.array([0.6, 0.0, 0.4]))
+        noisy = np.round(clean * rng.gamma(4.0, 0.25, size=len(clean)))  # CV 0.5
+        phi = _deviance_of(noisy, simple_P, [0, 1, 2], decomposeQP) / 1
+        assert phi > 1  # over-dispersed by construction, so the margin scales up
+
+    def test_the_default_is_the_scaled_deviance_step_at_margin_five(self, simple_P):
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        np.random.seed(0)
+        default = hybrid_stepwise_selection(counts, simple_P, R=30)
+        np.random.seed(0)
+        explicit = hybrid_stepwise_selection(
+            counts, simple_P, R=30, min_deviance_gain=5.0, dispersion_scaled=True
+        )
+        np.random.seed(0)
+        off = hybrid_stepwise_selection(counts, simple_P, R=30, min_deviance_gain=None)
+        assert sorted(default[0].tolist()) == sorted(explicit[0].tolist()) == [0, 2]
+        assert len(off[0]) >= 2  # the plain search still runs with the step disabled

@@ -91,6 +91,97 @@ def _prune_by_fit_gain(m_norm, P, cols, min_gain, protected, decomposition_metho
     return cols
 
 
+def _as_counts(m, mutation_count):
+    """The profile as mutation counts, for the deviance-based steps."""
+    m = np.asarray(m, dtype=float)
+    if mutation_count is None:
+        return m  # _bootstrap_matrix has already checked these are whole counts
+    return m / m.sum() * mutation_count
+
+
+def _poisson_deviance(counts, mu):
+    """Poisson deviance of observed counts against fitted means ``mu``."""
+    mu = np.maximum(mu, 1e-3)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        term = np.where(counts > 0, counts * np.log(counts / mu), 0.0)
+    return float(2.0 * np.sum(term - (counts - mu)))
+
+
+def _deviance_of(counts, P, cols, decomposition_method):
+    n = counts.sum()
+    exposures = decomposition_method(counts / n, P[:, cols])
+    return _poisson_deviance(counts, n * (P[:, cols] @ exposures))
+
+
+def _swap_by_deviance(
+    counts, P, cols, min_gain, protected, decomposition_method, max_swaps=50
+):
+    """Replace an active signature by an inactive one when that lowers the
+    Poisson deviance of the fit by more than `min_gain`.
+
+    The bootstrap search measures each signature against the detection
+    threshold on its own and never compares two signatures head to head, so a
+    signature that is only stable because a better-fitting competitor was
+    removed earlier (a flat C>T signature standing in for a trace of APOBEC,
+    for instance) is never revisited.  Greedy: one swap per round, the largest
+    gain first, until no swap clears the margin.  Protected (mandatory)
+    signatures are never swapped out.
+    """
+    cols = sorted(cols)
+    N = P.shape[1]
+    seen = {frozenset(cols)}
+    for _ in range(max_swaps):
+        base = _deviance_of(counts, P, cols, decomposition_method)
+        best_gain, best = min_gain, None
+        for out in cols:
+            if out in protected:
+                continue
+            rest = [c for c in cols if c != out]
+            for into in range(N):
+                if into in cols:
+                    continue
+                cand = sorted(rest + [into])
+                if frozenset(cand) in seen:
+                    continue
+                gain = base - _deviance_of(counts, P, cand, decomposition_method)
+                if gain > best_gain:
+                    best_gain, best = gain, cand
+        if best is None:
+            break
+        cols = best
+        seen.add(frozenset(cols))
+    return cols
+
+
+def _prune_by_deviance(counts, P, cols, min_gain, protected, decomposition_method):
+    """Backward elimination on Poisson deviance.
+
+    Same loop as `_prune_by_fit_gain`, but the cost of dropping a signature is
+    the rise in Poisson deviance rather than the loss of reconstruction
+    cosine.  The cosine is dominated by the high-count channels, so a peaked
+    signature carrying a few percent of the profile costs as little as a flat
+    one parked on the residual; the deviance weights every channel by its
+    expected count and tells the two apart.  A negative cost (dropping the
+    signature *lowers* the deviance, which the least-squares QP solution
+    allows) always prunes.
+    """
+    cols = list(cols)
+    while len(cols) > 2:
+        base = _deviance_of(counts, P, cols, decomposition_method)
+        worst, worst_cost = None, None
+        for s in cols:
+            if s in protected:
+                continue
+            kept = [c for c in cols if c != s]
+            cost = _deviance_of(counts, P, kept, decomposition_method) - base
+            if worst_cost is None or cost < worst_cost:
+                worst, worst_cost = s, cost
+        if worst is None or worst_cost >= min_gain:
+            break
+        cols.remove(worst)
+    return cols
+
+
 def hybrid_stepwise_selection(
     m,
     P,
@@ -104,6 +195,8 @@ def hybrid_stepwise_selection(
     max_iterations=1000,
     min_fit_improvement=None,
     overdispersion=None,
+    min_deviance_gain=5.0,
+    dispersion_scaled=True,
     rng=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Select the active signatures of one sample with a bootstrap stepwise search.
@@ -152,6 +245,32 @@ def hybrid_stepwise_selection(
             ``_bootstrap_matrix``), so a channel with ``c`` counts varies with
             SD ``sqrt(c + (overdispersion * c)^2)``. Prevents flat signatures
             from surviving on deep profiles. None means plain multinomial.
+        min_deviance_gain (float | None): If set, follow the search with two
+            steps scored by the Poisson deviance of the fit, both using this
+            margin: a swap step that replaces an active signature by an
+            inactive one whenever that lowers the deviance by more than the
+            margin, then a backward elimination that drops any signature
+            whose removal raises the deviance by less than it. The bootstrap
+            asks whether an exposure is stable; this asks whether the
+            signature is needed, and unlike ``min_fit_improvement`` it
+            weights every channel by its expected count, so a peaked
+            signature at a few percent of the profile is kept while a flat
+            one parked on the residual is not. 5 (the chi-square scale, one
+            degree of freedom) was validated on the in-silico breast
+            benchmark and is the default. Mandatory signatures are exempt.
+            Runs before ``min_fit_improvement`` when both are set. None
+            disables it and recovers the plain bootstrap search.
+        dispersion_scaled (bool): Put ``min_deviance_gain`` on the
+            quasi-likelihood scale: the margin is multiplied by the dispersion
+            ``max(1, deviance / (K - N))`` of the fit against the whole
+            pre-filtered panel (the most saturated model, so the estimate
+            carries as little misfit as possible). Real catalogues are
+            over-dispersed relative to Poisson (deviance per degree of freedom
+            of 2--11 on breast whole genomes against 0--0.4 on the synthetic
+            benchmarks), and an unscaled margin that filters the latter is a
+            no-op on the former. The floor at 1 leaves Poisson-or-quieter
+            profiles exactly as with ``dispersion_scaled=False``. Default
+            True.
         rng (None | int | SeedSequence | Generator): Source of the bootstrap
             draws. None uses the global ``np.random``. Anything else goes
             through ``np.random.default_rng`` and leaves the global state alone;
@@ -167,6 +286,8 @@ def hybrid_stepwise_selection(
     """
     N = P.shape[1]
     _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
+    if min_deviance_gain is not None and min_deviance_gain < 0:
+        raise ValueError("'min_deviance_gain' must be a non-negative deviance margin.")
 
     # --- optional pre-filter ------------------------------------------------
     if pre_filter_threshold is not None:
@@ -242,6 +363,26 @@ def hybrid_stepwise_selection(
 
         selected = candidate
         visited.add(frozenset(selected))
+
+    if min_deviance_gain is not None:
+        counts = _as_counts(m, mutation_count)
+        margin = min_deviance_gain
+        if dispersion_scaled:
+            df = max(1, P.shape[0] - N)
+            phi = _deviance_of(counts, P, list(range(N)), decomposition_method) / df
+            margin = min_deviance_gain * max(1.0, phi)
+        selected = set(
+            _swap_by_deviance(
+                counts, P, sorted(selected), margin, mandatory_local,
+                decomposition_method,
+            )
+        )
+        selected = set(
+            _prune_by_deviance(
+                counts, P, sorted(selected), margin, mandatory_local,
+                decomposition_method,
+            )
+        )
 
     if min_fit_improvement is not None:
         selected = set(

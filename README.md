@@ -82,6 +82,17 @@ Most important parameters:
   pass `None` to disable it and search from the full panel,
 - `mandatory_indices` — indices of signatures that are always present (e.g. the ubiquitous
   SBS1/SBS5) and are never removed,
+- `min_deviance_gain` (default `5`) — after the bootstrap search, a swap step and a
+  backward elimination scored by the Poisson deviance of the fit: an active signature is
+  replaced by an inactive one when that lowers the deviance by more than this margin, and
+  dropped when its removal raises it by less. The bootstrap asks whether an exposure is
+  stable; this asks whether the signature is needed, and it keeps a peaked signature at a
+  few percent of the profile while dropping a flat one parked on the residual. `5` was
+  validated on the in-silico breast benchmark; mandatory signatures are exempt; `None`
+  disables the step. With `dispersion_scaled=True` (default) the margin is multiplied by
+  the over-dispersion of the fit (`max(1, deviance/df)`), which leaves Poisson-or-quieter
+  profiles unchanged and keeps the step meaningful on real catalogues, where the deviance
+  per degree of freedom is typically 2--11,
 - `rng` — source of the bootstrap draws: `None` (default) uses the global `np.random`, so
   `np.random.seed` controls the result; an int, a `SeedSequence` or a `Generator` gives an
   independent stream that leaves the global state alone. `bootstrapSigExposures` takes it too.
