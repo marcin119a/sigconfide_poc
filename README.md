@@ -14,7 +14,7 @@ bootstrap.
 
 ## 1. Installation
 
-The project requires **Python ≥ 3.10**. A virtual environment is recommended:
+The project requires **Python ≥ 3.11**. A virtual environment is recommended:
 
 ```bash
 # create and activate a venv
