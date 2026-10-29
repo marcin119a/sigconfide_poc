@@ -80,24 +80,25 @@ Most important parameters:
 - `pre_filter_threshold` (default `0.001`) — a single fast QP solve prunes trace
   signatures before the bootstrap loop (~4× fewer signatures, no loss of sensitivity);
   pass `None` to disable it and search from the full panel,
-- `mandatory_indices` — indices of signatures that are always present (e.g. the ubiquitous
-  SBS1/SBS5) and are never removed by the search,
-- `mandatory_floor` (default `0.002`) — relative exposure below which a mandatory signature
-  is dropped from the final answer after the search and the deviance steps. The forced
-  signature is still carried through the search, so a trace of SBS1 gets fitted at all and
+- `anchor_indices` — indices of anchor signatures (e.g. the ubiquitous SBS1/SBS5): they
+  survive the pre-filter, are present from the start and are never removed by the search;
+  they face one check at the end, the `anchor_floor`,
+- `anchor_floor` (default `0.002`) — relative exposure below which an anchor signature
+  is dropped from the final answer after the search and the deviance steps. The anchor
+  is still carried through the search, so a trace of SBS1 gets fitted at all and
   a look-alike cannot stand in for SBS5; the floor only asks whether the final fit used it.
   Columns below it go one at a time, smallest first, with a refit after each; at least two
-  signatures survive. On the synthetic benchmarks a forced SBS1/SBS5 the profile does not
-  use ends at a median 0.01--0.09% of the profile and the true traces the set rescues at
-  about 0.5%; `0.002` was the largest floor that cost nothing where the set helps. `None`
-  keeps every mandatory signature whatever its exposure,
+  signatures survive. On the synthetic benchmarks an anchored SBS1/SBS5 the profile does not
+  use ends at a median 0.01--0.09% of the profile and the true traces the anchors rescue at
+  about 0.5%; `0.002` was the largest floor that cost nothing where the anchors help. `None`
+  keeps every anchor signature whatever its exposure,
 - `min_deviance_gain` (default `5`) — after the bootstrap search, a swap step and a
   backward elimination scored by the Poisson deviance of the fit: an active signature is
   replaced by an inactive one when that lowers the deviance by more than this margin, and
   dropped when its removal raises it by less. The bootstrap asks whether an exposure is
   stable; this asks whether the signature is needed, and it keeps a peaked signature at a
   few percent of the profile while dropping a flat one parked on the residual. `5` was
-  validated on the in-silico breast benchmark; mandatory signatures are exempt; `None`
+  validated on the in-silico breast benchmark; anchor signatures are exempt; `None`
   disables the step. With `dispersion_scaled=True` (default) the margin is multiplied by
   the over-dispersion of the fit (`max(1, deviance/df)`), which leaves Poisson-or-quieter
   profiles unchanged and keeps the step meaningful on real catalogues, where the deviance

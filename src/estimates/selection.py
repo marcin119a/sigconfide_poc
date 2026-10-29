@@ -141,7 +141,7 @@ def _swap_by_deviance(
     signature that is only stable because a better-fitting competitor was
     removed earlier (a flat C>T signature standing in for a trace of APOBEC,
     for instance) is never revisited.  Greedy: one swap per round, the largest
-    gain first, until no swap clears the margin.  Protected (mandatory)
+    gain first, until no swap clears the margin.  Protected (anchor)
     signatures are never swapped out.
     """
     cols = sorted(cols)
@@ -175,7 +175,7 @@ def _prune_by_deviance(counts, P, cols, min_gain, protected, decomposition_metho
 
     Greedy loop: repeatedly drop the signature whose removal raises the
     Poisson deviance least, while that rise stays below `min_gain`.
-    Protected (mandatory) signatures are never dropped and at least two
+    Protected (anchor) signatures are never dropped and at least two
     signatures always survive.  A reconstruction error such as the cosine
     similarity is dominated by the high-count channels, so a peaked signature
     carrying a few percent of the profile costs as little as a flat one
@@ -201,12 +201,12 @@ def _prune_by_deviance(counts, P, cols, min_gain, protected, decomposition_metho
     return cols
 
 
-def _apply_mandatory_floor(
+def _apply_anchor_floor(
     m, P, cols, exposures, errors, protected, floor, decomposition_method
 ):
-    """Drop forced signatures whose final relative exposure is below `floor`.
+    """Drop anchor signatures whose final relative exposure is below `floor`.
 
-    A mandatory signature is carried through the search unconditionally so
+    An anchor signature is carried through the search unconditionally so
     that a trace of it is fitted at all and a look-alike cannot stand in for
     it; this last step asks whether the fit actually used it.  One column at
     a time, the smallest exposure first, refitting after each removal because
@@ -239,12 +239,12 @@ def hybrid_stepwise_selection(
     min_support=0.95,
     decomposition_method=decomposeQP,
     pre_filter_threshold=0.001,
-    mandatory_indices=None,
+    anchor_indices=None,
     max_iterations=1000,
     overdispersion=None,
     min_deviance_gain=5.0,
     dispersion_scaled=True,
-    mandatory_floor=0.002,
+    anchor_floor=0.002,
     rng=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Select the active signatures of one sample with a bootstrap stepwise search.
@@ -276,9 +276,10 @@ def hybrid_stepwise_selection(
             first and discard signatures with exposure below this value before
             the bootstrap loop. The default 0.001 showed zero recall loss on
             typical COSMIC data while reducing N about 4x. None disables it.
-        mandatory_indices (list[int] | None): Column indices of ``P`` that are
-            always active: they survive the pre-filter, are present from the
-            first iteration and are never removed. Useful for ubiquitous
+        anchor_indices (list[int] | None): Column indices of ``P`` anchored
+            in the model: they survive the pre-filter, are present from the
+            first iteration and are never removed by the search. They face
+            one check at the end, see ``anchor_floor``. Useful for ubiquitous
             signatures such as SBS1 and SBS5.
         max_iterations (int): Hard cap on add/remove moves, a last-resort guard
             against oscillation on degenerate low-count profiles. Default 1000.
@@ -313,14 +314,14 @@ def hybrid_stepwise_selection(
             leaves Poisson-or-quieter profiles exactly as with ``dispersion_scaled=False``.
             Default
             True.
-        mandatory_floor (float | None): Relative exposure below which a
-            mandatory signature is dropped from the final answer. The
-            mandatory set is carried through the search unconditionally, so
-            that a trace of SBS1 is fitted at all and a look-alike cannot
-            stand in for SBS5; this last step then asks whether the final fit
-            actually used the forced column. Columns below the floor are
+        anchor_floor (float | None): Relative exposure below which an
+            anchor signature is dropped from the final answer. The anchor
+            set is carried through the search unconditionally, so that a
+            trace of SBS1 is fitted at all and a look-alike cannot stand in
+            for SBS5; this last step then asks whether the final fit
+            actually used the anchored column. Columns below the floor are
             removed one at a time, the smallest first, with a refit after
-            each, and at least two signatures always survive. Default 0.002:.
+            each, and at least two signatures always survive. Default 0.002.
         rng (None | int | SeedSequence | Generator): Source of the bootstrap
             draws. None uses the global ``np.random``. Anything else goes
             through ``np.random.default_rng`` and leaves the global state alone;
@@ -335,7 +336,7 @@ def hybrid_stepwise_selection(
         error (Frobenius norm).
     """
     N = P.shape[1]
-    _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
+    _anchors = list(anchor_indices) if anchor_indices is not None else []
     if min_deviance_gain is not None and min_deviance_gain < 0:
         raise ValueError("'min_deviance_gain' must be a non-negative deviance margin.")
 
@@ -344,19 +345,19 @@ def hybrid_stepwise_selection(
         m_norm = m / m.sum()
         init_exp = decomposition_method(m_norm, P)
         keep_mask = init_exp > pre_filter_threshold
-        for idx in _mandatory:  # mandatory sigs always survive pre-filter
+        for idx in _anchors:  # anchor sigs always survive pre-filter
             keep_mask[idx] = True
         keep = np.where(keep_mask)[0]
         if len(keep) < 2:  # safety: need at least 2 sigs
             keep = np.argsort(init_exp)[-2:]
         P = P[:, keep]
         N = P.shape[1]
-        # remap mandatory global indices → local indices in filtered P
+        # remap anchor global indices → local indices in filtered P
         keep_list = keep.tolist()
-        mandatory_local = set(keep_list.index(i) for i in _mandatory if i in keep_list)
+        anchor_local = set(keep_list.index(i) for i in _anchors if i in keep_list)
     else:
         keep = None
-        mandatory_local = set(_mandatory)
+        anchor_local = set(_anchors)
     # ------------------------------------------------------------------------
 
     if isinstance(overdispersion, str):
@@ -368,7 +369,7 @@ def hybrid_stepwise_selection(
             m, P, mutation_count, decomposition_method
         )
     M = _bootstrap_matrix(m, mutation_count, R, overdispersion, rng)
-    # Mandatory sigs are in `selected` from the start (same as all others since
+    # Anchor sigs are in `selected` from the start (same as all others since
     # we begin with the full set, but the backward step will never evict them).
     selected = set(range(N))
 
@@ -384,14 +385,14 @@ def hybrid_stepwise_selection(
         current_cols = sorted(selected)
 
         # Backward: try removing one selected signature.
-        # Mandatory signatures are protected — skip them.
+        # Anchor signatures are protected — skip them.
         if len(selected) > 2:
             sup = _evaluate(
                 M, P, np.array(current_cols), threshold, decomposition_method
             )
             sup_map = {col: sup[i] for i, col in enumerate(current_cols)}
             for s in selected:
-                if s in mandatory_local:  # ← SPA-style: never evict
+                if s in anchor_local:  # anchors are never evicted
                     continue
                 benefit = min_support - sup_map[s]
                 if benefit > best_benefit:
@@ -431,13 +432,13 @@ def hybrid_stepwise_selection(
             margin = min_deviance_gain * max(1.0, phi)
         selected = set(
             _swap_by_deviance(
-                counts, P, sorted(selected), margin, mandatory_local,
+                counts, P, sorted(selected), margin, anchor_local,
                 decomposition_method,
             )
         )
         selected = set(
             _prune_by_deviance(
-                counts, P, sorted(selected), margin, mandatory_local,
+                counts, P, sorted(selected), margin, anchor_local,
                 decomposition_method,
             )
         )
@@ -448,10 +449,10 @@ def hybrid_stepwise_selection(
     )
     exposures = exposures.flatten()
 
-    if mandatory_floor is not None and mandatory_local:
-        local_indices, exposures, errors = _apply_mandatory_floor(
-            m, P, local_indices, exposures, errors, mandatory_local,
-            mandatory_floor, decomposition_method,
+    if anchor_floor is not None and anchor_local:
+        local_indices, exposures, errors = _apply_anchor_floor(
+            m, P, local_indices, exposures, errors, anchor_local,
+            anchor_floor, decomposition_method,
         )
 
     # map back to original P column indices (identity when pre_filter disabled)
