@@ -31,7 +31,11 @@ def main(argv=None):
     )
     a = p.parse_args(argv)
     fit_spa_style(
-        a.samples, a.signatures, a.output, R=a.R, n_jobs=a.n_jobs,
+        a.samples,
+        a.signatures,
+        a.output,
+        R=a.R,
+        n_jobs=a.n_jobs,
         overdispersion=a.overdispersion,
     )
 

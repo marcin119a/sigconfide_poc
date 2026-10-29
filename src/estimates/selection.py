@@ -310,10 +310,9 @@ def hybrid_stepwise_selection(
             pre-filtered panel (the most saturated model, so the estimate
             carries as little misfit as possible). Real catalogues are
             over-dispersed relative to Poisson and an unscaled margin that
-            filters the latter is a no-op on the former. The floor at 1 
-            leaves Poisson-or-quieter profiles exactly as with ``dispersion_scaled=False``.
-            Default
-            True.
+            filters the latter is a no-op on the former. The floor at 1
+            leaves Poisson-or-quieter profiles exactly as with
+            ``dispersion_scaled=False``. Default True.
         anchor_floor (float | None): Relative exposure below which an
             anchor signature is dropped from the final answer. The anchor
             set is carried through the search unconditionally, so that a
@@ -432,13 +431,21 @@ def hybrid_stepwise_selection(
             margin = min_deviance_gain * max(1.0, phi)
         selected = set(
             _swap_by_deviance(
-                counts, P, sorted(selected), margin, anchor_local,
+                counts,
+                P,
+                sorted(selected),
+                margin,
+                anchor_local,
                 decomposition_method,
             )
         )
         selected = set(
             _prune_by_deviance(
-                counts, P, sorted(selected), margin, anchor_local,
+                counts,
+                P,
+                sorted(selected),
+                margin,
+                anchor_local,
                 decomposition_method,
             )
         )
@@ -451,8 +458,14 @@ def hybrid_stepwise_selection(
 
     if anchor_floor is not None and anchor_local:
         local_indices, exposures, errors = _apply_anchor_floor(
-            m, P, local_indices, exposures, errors, anchor_local,
-            anchor_floor, decomposition_method,
+            m,
+            P,
+            local_indices,
+            exposures,
+            errors,
+            anchor_local,
+            anchor_floor,
+            decomposition_method,
         )
 
     # map back to original P column indices (identity when pre_filter disabled)

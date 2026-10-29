@@ -274,8 +274,12 @@ class TestHybridStepwiseSelection:
         m = self._counts(selection_panel, weights)
         np.random.seed(0)
         sel_idx, exposures, _ = hybrid_stepwise_selection(
-            m, selection_panel, R=40, anchor_indices=[3, 4],
-            pre_filter_threshold=0.5, anchor_floor=0.01,
+            m,
+            selection_panel,
+            R=40,
+            anchor_indices=[3, 4],
+            pre_filter_threshold=0.5,
+            anchor_floor=0.01,
         )
         assert len(sel_idx) >= 2
         assert 3 in sel_idx
@@ -393,8 +397,8 @@ class TestCycleGuard:
             identity_panel,
             R=5,
             decomposition_method=self._oscillating_decomposer(counter),
-            pre_filter_threshold=None,
-            min_deviance_gain=None,  # these tests exercise the greedy walk alone  # the walk must start from the full panel
+            pre_filter_threshold=None,  # the walk must start from the full panel
+            min_deviance_gain=None,  # these tests exercise the greedy walk alone
             max_iterations=50,
         )
         # Terminated by cycle detection, not by exhausting max_iterations:
@@ -412,8 +416,8 @@ class TestCycleGuard:
             identity_panel,
             R=5,
             decomposition_method=self._oscillating_decomposer(counter),
-            pre_filter_threshold=None,
-            min_deviance_gain=None,  # these tests exercise the greedy walk alone  # the walk must start from the full panel
+            pre_filter_threshold=None,  # the walk must start from the full panel
+            min_deviance_gain=None,  # these tests exercise the greedy walk alone
             max_iterations=1,
         )
         # One move only: signature 2 dropped from the initial full set.
@@ -478,10 +482,16 @@ class TestDevianceSteps:
         from sigconfide.estimates.selection import _prune_by_deviance
 
         counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
-        assert _prune_by_deviance(counts, simple_P, [0, 1, 2], 5.0, {1}, decomposeQP) == [0, 1, 2]
-        assert _prune_by_deviance(counts, simple_P, [1, 2], 1e9, set(), decomposeQP) == [1, 2]
+        assert _prune_by_deviance(
+            counts, simple_P, [0, 1, 2], 5.0, {1}, decomposeQP
+        ) == [0, 1, 2]
+        assert _prune_by_deviance(
+            counts, simple_P, [1, 2], 1e9, set(), decomposeQP
+        ) == [1, 2]
 
-    def test_selection_with_the_option_recovers_the_mixture(self, simple_P, known_weights, counts_profile):
+    def test_selection_with_the_option_recovers_the_mixture(
+        self, simple_P, known_weights, counts_profile
+    ):
         np.random.seed(0)
         idx, expo, _ = hybrid_stepwise_selection(
             counts_profile, simple_P, R=30, min_deviance_gain=5.0
@@ -492,7 +502,9 @@ class TestDevianceSteps:
     def test_selection_with_the_option_drops_a_spurious_column(self, simple_P):
         counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
         np.random.seed(0)
-        idx, _, _ = hybrid_stepwise_selection(counts, simple_P, R=30, min_deviance_gain=5.0)
+        idx, _, _ = hybrid_stepwise_selection(
+            counts, simple_P, R=30, min_deviance_gain=5.0
+        )
         assert sorted(idx.tolist()) == [0, 2]
 
     def test_fractional_profile_uses_the_mutation_count(self, simple_P):
@@ -505,7 +517,9 @@ class TestDevianceSteps:
 
     def test_negative_margin_raises(self, counts_profile, simple_P):
         with pytest.raises(ValueError, match="min_deviance_gain"):
-            hybrid_stepwise_selection(counts_profile, simple_P, R=2, min_deviance_gain=-1.0)
+            hybrid_stepwise_selection(
+                counts_profile, simple_P, R=2, min_deviance_gain=-1.0
+            )
 
     def test_dispersion_scaling_is_a_no_op_on_poisson_or_quieter_data(self, simple_P):
         counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
@@ -562,8 +576,7 @@ class TestOverdispersionEstimate:
         rng = np.random.default_rng(1)
         mu = 50000 * (P @ self.weights)
         est = [
-            estimate_overdispersion(rng.poisson(mu).astype(float), P)
-            for _ in range(20)
+            estimate_overdispersion(rng.poisson(mu).astype(float), P) for _ in range(20)
         ]
         assert min(est) >= 0.0
         assert max(est) < 0.03
@@ -571,7 +584,7 @@ class TestOverdispersionEstimate:
 
     @pytest.mark.parametrize("sigma", [0.05, 0.10, 0.20])
     def test_recovers_the_gamma_poisson_dispersion(self, sigma):
-        """Deep gamma-Poisson profile with CV `sigma` per channel: Var = c + (sigma c)^2."""
+        """Deep gamma-Poisson profile, CV `sigma` per channel: Var = c + (sigma c)^2."""
         P = self._panel()
         rng = np.random.default_rng(2)
         mu = 200000 * (P @ self.weights)
@@ -591,7 +604,8 @@ class TestOverdispersionEstimate:
             est = []
             for _ in range(20):
                 g = rng.gamma(100.0, 0.01, size=P.shape[0])  # CV 0.10
-                est.append(estimate_overdispersion(rng.poisson(mu * g).astype(float), P))
+                counts = rng.poisson(mu * g).astype(float)
+                est.append(estimate_overdispersion(counts, P))
             spread[n] = np.std(est)
         assert spread[200000] < spread[500] / 3
 
@@ -605,9 +619,8 @@ class TestOverdispersionEstimate:
         g = rng.gamma(100.0, 0.01, size=P.shape[0])
         counts = rng.poisson(100000 * (P @ self.weights) * g).astype(float)
         n = int(counts.sum())
-        assert estimate_overdispersion(counts / n, P, mutation_count=n) == pytest.approx(
-            estimate_overdispersion(counts, P)
-        )
+        scaled = estimate_overdispersion(counts / n, P, mutation_count=n)
+        assert scaled == pytest.approx(estimate_overdispersion(counts, P))
 
 
 class TestAutoOverdispersion:
@@ -634,7 +647,9 @@ class TestAutoOverdispersion:
         assert auto[0].tolist() == explicit[0].tolist()
         assert auto[1] == pytest.approx(explicit[1])
 
-    def test_auto_on_a_clean_profile_is_the_multinomial_bootstrap(self, simple_P, counts_profile):
+    def test_auto_on_a_clean_profile_is_the_multinomial_bootstrap(
+        self, simple_P, counts_profile
+    ):
         auto = hybrid_stepwise_selection(
             counts_profile, simple_P, R=30, overdispersion="auto", rng=1
         )
@@ -654,14 +669,18 @@ class TestAutoOverdispersion:
         keep = decomposeQP(counts / counts.sum(), P) > 0.001
         sigma = estimate_overdispersion(counts, P[:, keep])
         auto = hybrid_stepwise_selection(counts, P, R=30, overdispersion="auto", rng=2)
-        explicit = hybrid_stepwise_selection(counts, P, R=30, overdispersion=sigma, rng=2)
+        explicit = hybrid_stepwise_selection(
+            counts, P, R=30, overdispersion=sigma, rng=2
+        )
         assert auto[0].tolist() == explicit[0].tolist()
 
     def test_auto_recovers_the_mixture_on_a_deep_noisy_profile(self):
         P = TestOverdispersionEstimate._panel(N=8)
         w = np.array([0.4, 0.3, 0.2, 0.1, 0, 0, 0, 0])
         counts = self._noisy_counts(P, w, 100000, 0.10, seed=8)
-        idx, expo, _ = hybrid_stepwise_selection(counts, P, R=50, overdispersion="auto", rng=3)
+        idx, expo, _ = hybrid_stepwise_selection(
+            counts, P, R=50, overdispersion="auto", rng=3
+        )
         assert {0, 1, 2, 3} <= set(idx.tolist())
         assert len(idx) <= 5
 
@@ -674,4 +693,6 @@ class TestAutoOverdispersion:
 
     def test_unknown_string_raises(self, simple_P, counts_profile):
         with pytest.raises(ValueError, match="overdispersion"):
-            hybrid_stepwise_selection(counts_profile, simple_P, R=2, overdispersion="guess")
+            hybrid_stepwise_selection(
+                counts_profile, simple_P, R=2, overdispersion="guess"
+            )

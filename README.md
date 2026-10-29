@@ -10,11 +10,6 @@ quadratic-programming (QP) problem, and the set of relevant signatures is chosen
 with a stepwise (forward/backward) procedure whose significance is assessed via
 bootstrap.
 
-> Benchmark scripts, example/benchmark data, and comparisons against other
-> refitters (SigProfilerAssignment, MuSiCal) live in the sibling
-> `results_sigconfide/` directory at the monorepo root — see the top-level
-> README there for how to run them.
-
 ---
 
 ## 1. Installation
@@ -74,6 +69,12 @@ for idx, exp in zip(sel_idx, exposures):
 
 Most important parameters:
 - `R` — number of bootstrap replicates (more = more stable, slower),
+- `mutation_count` — total number of mutations in the sample; needed only when `m` holds
+  probabilities rather than integer counts, so the bootstrap knows how many mutations to
+  resample,
+- `threshold` (default `0.01`) — relative exposure above which a signature counts as
+  present in a bootstrap replicate; together with `min_support` it defines the bootstrap
+  support,
 - `min_support` (default `0.95`) — minimum bootstrap support (fraction of replicates in which
   a signature's exposure exceeds `threshold`) for a signature to be kept/added; this is a
   stability criterion, not a significance test,
@@ -88,21 +89,19 @@ Most important parameters:
   is still carried through the search, so a trace of SBS1 gets fitted at all and
   a look-alike cannot stand in for SBS5; the floor only asks whether the final fit used it.
   Columns below it go one at a time, smallest first, with a refit after each; at least two
-  signatures survive. On the synthetic benchmarks an anchored SBS1/SBS5 the profile does not
-  use ends at a median 0.01--0.09% of the profile and the true traces the anchors rescue at
-  about 0.5%; `0.002` was the largest floor that cost nothing where the anchors help. `None`
-  keeps every anchor signature whatever its exposure,
+  signatures survive. `None` keeps every anchor signature whatever its exposure,
 - `min_deviance_gain` (default `5`) — after the bootstrap search, a swap step and a
   backward elimination scored by the Poisson deviance of the fit: an active signature is
   replaced by an inactive one when that lowers the deviance by more than this margin, and
   dropped when its removal raises it by less. The bootstrap asks whether an exposure is
   stable; this asks whether the signature is needed, and it keeps a peaked signature at a
-  few percent of the profile while dropping a flat one parked on the residual. `5` was
-  validated on the in-silico breast benchmark; anchor signatures are exempt; `None`
-  disables the step. With `dispersion_scaled=True` (default) the margin is multiplied by
-  the over-dispersion of the fit (`max(1, deviance/df)`), which leaves Poisson-or-quieter
-  profiles unchanged and keeps the step meaningful on real catalogues, where the deviance
-  per degree of freedom is typically 2--11,
+  few percent of the profile while dropping a flat one parked on the residual. Anchor
+  signatures are exempt; `None` disables the step,
+- `dispersion_scaled` (default `True`) — puts `min_deviance_gain` on the quasi-likelihood
+  scale: the margin is multiplied by the over-dispersion of the fit against the whole
+  pre-filtered panel (`max(1, deviance/df)`), which leaves Poisson-or-quieter profiles
+  unchanged and keeps the step meaningful on real catalogues, where the deviance per
+  degree of freedom is typically 2--11; `False` applies the margin as given,
 - `overdispersion` (default `None`) — over-dispersed bootstrap: each replicate first scales
   every channel by a gamma factor with this coefficient of variation, so a channel with `c`
   counts varies with SD `sqrt(c + (overdispersion * c)^2)` instead of `sqrt(c)`; on deep
@@ -111,12 +110,13 @@ Most important parameters:
   against the pre-filtered panel (method of moments on `Var = c + sigma^2 c^2`, see
   `estimate_overdispersion`): it is 0, i.e. the plain multinomial bootstrap, when the
   residual is within counting noise, and the excess dispersion of the catalogue otherwise,
+- `decomposition_method` (default `decomposeQP`) — solver `f(m, P) -> exposures` used for
+  every fit, in the search and in the deviance steps alike,
+- `max_iterations` (default `1000`) — hard cap on add/remove moves of the search, a
+  last-resort guard against oscillation on degenerate low-count profiles,
 - `rng` — source of the bootstrap draws: `None` (default) uses the global `np.random`, so
   `np.random.seed` controls the result; an int, a `SeedSequence` or a `Generator` gives an
   independent stream that leaves the global state alone. `bootstrapSigExposures` takes it too.
-
-For a runnable end-to-end example loading real COSMIC panels and sample data,
-see `results_sigconfide/examples/run_sbs_example.py` in the monorepo root.
 
 ### Other functions in the package
 
@@ -155,6 +155,3 @@ src/
 tests/
 docs/                       # MkDocs sources; API reference is generated from docstrings
 ```
-
-Benchmarks, example/comparison scripts and their input data are not part of
-this package — they live in `results_sigconfide/` at the monorepo root.

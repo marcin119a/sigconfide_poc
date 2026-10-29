@@ -27,12 +27,22 @@ def test_cli_runs_with_auto_overdispersion(tmp_path):
     pd.DataFrame(counts, index=contexts, columns=["a", "b"]).to_csv(
         tmp_path / "samples.tsv", sep="\t"
     )
-    main([
-        "--samples", str(tmp_path / "samples.tsv"),
-        "--signatures", str(tmp_path / "sigs.tsv"),
-        "--output", str(tmp_path / "out"),
-        "--R", "20", "--n-jobs", "1", "--overdispersion", "auto",
-    ])
+    main(
+        [
+            "--samples",
+            str(tmp_path / "samples.tsv"),
+            "--signatures",
+            str(tmp_path / "sigs.tsv"),
+            "--output",
+            str(tmp_path / "out"),
+            "--R",
+            "20",
+            "--n-jobs",
+            "1",
+            "--overdispersion",
+            "auto",
+        ]
+    )
     act = read_activities(tmp_path / "out" / OUTPUT_NAME)
     assert act.shape == (2, 5)
     assert act.sum(axis=1).values == pytest.approx(counts.sum(axis=0))
