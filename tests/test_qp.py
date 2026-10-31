@@ -35,3 +35,24 @@ class TestDecomposeQP:
         m = 0.3 * simple_P[:, 0] + 0.7 * simple_P[:, 1]
         exposures = decomposeQP(m, simple_P)
         assert exposures == pytest.approx([0.3, 0.7, 0.0], abs=1e-6)
+
+
+def test_unused_signatures_are_exact_zeros():
+    """quadprog leaves inactive variables as 1e-24..1e-12 noise; the wrapper
+    must return exact zeros so that a positive exposure means 'used'."""
+    import numpy as np
+    from sigconfide.decompose.qp import ZERO_TOL, decomposeQP, decomposeQP_batch
+
+    rng = np.random.default_rng(0)
+    K, N = 96, 30
+    P = rng.random((K, N)); P /= P.sum(axis=0)
+    truth = np.zeros(N); truth[[0, 5, 17]] = [0.6, 0.3, 0.1]
+    m = P @ truth
+    x = decomposeQP(m, P)
+    assert np.all((x == 0) | (x >= ZERO_TOL))
+    assert (x == 0).sum() >= N - 6
+    M = rng.poisson(5000 * m[:, None] * np.ones((1, 20))).astype(float)
+    M /= M.sum(axis=0)
+    E = decomposeQP_batch(M, P)
+    assert np.all((E == 0) | (E >= ZERO_TOL))
+    assert np.allclose(E.sum(axis=0), 1.0)

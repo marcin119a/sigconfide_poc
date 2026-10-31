@@ -30,14 +30,16 @@ def _qp_constraints(P):
     return G, C, b
 
 
+# Exposures below this fraction of the profile are solver noise and are set
+# to exact zero (1e-10 of a 10^5-mutation genome is 1e-5 mutations).
+ZERO_TOL = 1e-10
+
+
 def _solve_qp(G, C, b, d):
     # Solve quadratic programming problem
     out = quadprog.solve_qp(G, d, C, b, meq=1)
-
-    # Some exposure values are negative, but very close to 0
-    # Change these negative values to zero and renormalize
     exposures = out[0]
-    exposures[exposures < 0] = 0
+    exposures[exposures < ZERO_TOL] = 0
     exposures /= sum(exposures)
 
     # return the exposures
@@ -48,8 +50,9 @@ def decomposeQP(m, P) -> np.ndarray:
     """Fit one mutational profile to a signature panel with quadratic programming.
 
     Solves ``min ||m - P x||^2`` subject to ``sum(x) == 1`` and ``x >= 0`` with
-    ``quadprog``. Tiny negative values are clipped to 0 and the result is
-    renormalised. If ``P`` has more signatures than contexts, a negligible ridge
+    ``quadprog``. Values below ``ZERO_TOL`` (solver noise, negative or
+    positive) are set to 0 and the result is renormalised, so unused
+    signatures come back as exact zeros. If ``P`` has more signatures than contexts, a negligible ridge
     is added to ``P.T @ P`` so the problem stays positive definite.
 
     Args:

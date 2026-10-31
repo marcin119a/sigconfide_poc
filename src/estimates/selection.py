@@ -44,16 +44,20 @@ def _bootstrap_matrix(m, mutation_count, R, overdispersion=None, rng=None):
     return counts.T / mutation_count
 
 
-def _support(exposures, threshold):
-    """Bootstrap support: fraction of replicates where exposure exceeds threshold."""
-    return (exposures > threshold).sum(axis=1) / exposures.shape[1]
+def _support(exposures):
+    """Bootstrap support: fraction of replicates in which the exposure is positive.
+
+    The QP returns exact zeros for the columns it does not use, so a positive
+    exposure means the replicate used the signature at all.
+    """
+    return (exposures > 0).sum(axis=1) / exposures.shape[1]
 
 
-def _evaluate(M, P, cols, threshold, decomposition_method):
+def _evaluate(M, P, cols, decomposition_method):
     exposures, _ = findSigExposures(
         M, P[:, cols], decomposition_method=decomposition_method
     )
-    return _support(exposures, threshold)
+    return _support(exposures)
 
 
 def _as_counts(m, mutation_count):
@@ -136,8 +140,8 @@ def _swap_by_deviance(
     """Replace an active signature by an inactive one when that lowers the
     Poisson deviance of the fit by more than `min_gain`.
 
-    The bootstrap search measures each signature against the detection
-    threshold on its own and never compares two signatures head to head, so a
+    The bootstrap search measures the stability of each signature on its own
+    and never compares two signatures head to head, so a
     signature that is only stable because a better-fitting competitor was
     removed earlier (a flat C>T signature standing in for a trace of APOBEC,
     for instance) is never revisited.  Greedy: one swap per round, the largest
@@ -235,14 +239,13 @@ def hybrid_stepwise_selection(
     P,
     R,
     mutation_count=None,
-    threshold=0.01,
     min_support=0.95,
     decomposition_method=decomposeQP,
     pre_filter_threshold=0.001,
     anchor_indices=None,
     max_iterations=1000,
     overdispersion=None,
-    min_deviance_gain=5.0,
+    min_deviance_gain=10.0,
     dispersion_scaled=True,
     anchor_floor=0.002,
     rng=None,
@@ -250,7 +253,7 @@ def hybrid_stepwise_selection(
     """Select the active signatures of one sample with a bootstrap stepwise search.
 
     The bootstrap support of a signature is the fraction of bootstrap
-    replicates in which its exposure exceeds ``threshold``. It is a stability
+    replicates in which its exposure is positive. It is a stability
     measure, not a significance test. The search starts from the full
     (pre-filtered) panel and, in each iteration, applies the single best move:
     removing an active signature whose support is below ``min_support``,
@@ -266,10 +269,9 @@ def hybrid_stepwise_selection(
         R (int): Number of bootstrap replicates.
         mutation_count (int, optional): Total number of mutations. Required
             when ``m`` does not hold integer counts.
-        threshold (float): Exposure above which a signature counts as present
-            in a replicate. Default 0.01.
         min_support (float): Bootstrap support cutoff for adding or removing a
-            signature. Default 0.95.
+            signature: the fraction of replicates in which its exposure must
+            be positive. Default 0.95.
         decomposition_method (callable): Solver ``f(m, P) -> exposures``.
             Default ``decomposeQP``.
         pre_filter_threshold (float | None): Run one QP on the original profile
@@ -302,8 +304,7 @@ def hybrid_stepwise_selection(
             asks whether an exposure is stable; this asks whether the
             signature is needed, and it weights every channel by its
             expected count, so a peaked signature at a few percent of the
-            profile is kept while a flat one parked on the residual is not. 5.
-            None disables it and recovers the plain bootstrap search.
+            profile is kept while a flat one parked on the residual is not.
         dispersion_scaled (bool): Put ``min_deviance_gain`` on the
             quasi-likelihood scale: the margin is multiplied by the dispersion
             ``max(1, deviance / (K - N))`` of the fit against the whole
@@ -387,7 +388,7 @@ def hybrid_stepwise_selection(
         # Anchor signatures are protected — skip them.
         if len(selected) > 2:
             sup = _evaluate(
-                M, P, np.array(current_cols), threshold, decomposition_method
+                M, P, np.array(current_cols), decomposition_method
             )
             sup_map = {col: sup[i] for i, col in enumerate(current_cols)}
             for s in selected:
@@ -401,7 +402,7 @@ def hybrid_stepwise_selection(
         # Forward: add one discarded signature
         for s in set(range(N)) - selected:
             test_cols = np.array(sorted(selected | {s}))
-            sup = _evaluate(M, P, test_cols, threshold, decomposition_method)
+            sup = _evaluate(M, P, test_cols, decomposition_method)
             s_pos = list(test_cols).index(s)
             benefit = sup[s_pos] - min_support
             if benefit > best_benefit:

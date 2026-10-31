@@ -14,17 +14,22 @@ class TestSupport:
         # rows = signatures, cols = bootstrap replicates.
         exposures = np.array(
             [
-                [0.5, 0.5, 0.0],  # 2/3 replicates above threshold -> support = 2/3
-                [0.0, 0.0, 0.0],  # 0/3 replicates above threshold -> support = 0.0
-                [0.2, 0.2, 0.2],  # 3/3 replicates above threshold -> support = 1.0
+                [0.5, 0.5, 0.0],  # 2/3 replicates positive -> support = 2/3
+                [0.0, 0.0, 0.0],  # 0/3 replicates positive -> support = 0.0
+                [0.2, 0.2, 0.2],  # 3/3 replicates positive -> support = 1.0
             ]
         )
-        sup = _support(exposures, threshold=0.1)
+        sup = _support(exposures)
         assert sup == pytest.approx([2 / 3, 0.0, 1.0])
 
+    def test_any_positive_exposure_counts(self):
+        # No exposure scale: a trace counts like a large exposure, only zeros do not.
+        exposures = np.array([[1e-6, 1e-6, 0.0], [0.4, 0.4, 0.0]])
+        assert _support(exposures) == pytest.approx([2 / 3, 2 / 3])
+
     def test_bounds(self):
-        exposures = np.random.default_rng(0).random((4, 10))
-        sup = _support(exposures, threshold=0.5)
+        exposures = np.random.default_rng(0).random((4, 10)) - 0.5
+        sup = _support(exposures)
         assert np.all((sup >= 0.0) & (sup <= 1.0))
 
 
@@ -230,6 +235,14 @@ class TestHybridStepwiseSelection:
 
         params = inspect.signature(hybrid_stepwise_selection).parameters
         assert params["anchor_floor"].default == 0.002
+
+    def test_margin_and_support_defaults_and_no_threshold(self):
+        import inspect
+
+        params = inspect.signature(hybrid_stepwise_selection).parameters
+        assert "threshold" not in params
+        assert params["min_deviance_gain"].default == 10.0
+        assert params["min_support"].default == 0.95
 
     def test_anchor_floor_default_drops_unused_anchor(self, selection_panel):
         # Same profile as test_anchor_indices_always_present, package default.
@@ -540,13 +553,13 @@ class TestDevianceSteps:
         phi = _deviance_of(noisy, simple_P, [0, 1, 2], decomposeQP) / 1
         assert phi > 1  # over-dispersed by construction, so the margin scales up
 
-    def test_the_default_is_the_scaled_deviance_step_at_margin_five(self, simple_P):
+    def test_the_default_is_the_scaled_deviance_step_at_margin_ten(self, simple_P):
         counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
         np.random.seed(0)
         default = hybrid_stepwise_selection(counts, simple_P, R=30)
         np.random.seed(0)
         explicit = hybrid_stepwise_selection(
-            counts, simple_P, R=30, min_deviance_gain=5.0, dispersion_scaled=True
+            counts, simple_P, R=30, min_deviance_gain=10.0, dispersion_scaled=True,
         )
         np.random.seed(0)
         off = hybrid_stepwise_selection(counts, simple_P, R=30, min_deviance_gain=None)

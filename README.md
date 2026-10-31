@@ -72,12 +72,9 @@ Most important parameters:
 - `mutation_count` — total number of mutations in the sample; needed only when `m` holds
   probabilities rather than integer counts, so the bootstrap knows how many mutations to
   resample,
-- `threshold` (default `0.01`) — relative exposure above which a signature counts as
-  present in a bootstrap replicate; together with `min_support` it defines the bootstrap
-  support,
 - `min_support` (default `0.95`) — minimum bootstrap support (fraction of replicates in which
-  a signature's exposure exceeds `threshold`) for a signature to be kept/added; this is a
-  stability criterion, not a significance test,
+  a signature's exposure is positive) for a signature to be kept/added; this is a
+  stability criterion with no exposure scale, not a significance test.
 - `pre_filter_threshold` (default `0.001`) — a single fast QP solve prunes trace
   signatures before the bootstrap loop (~4× fewer signatures, no loss of sensitivity);
   pass `None` to disable it and search from the full panel,
@@ -90,13 +87,13 @@ Most important parameters:
   a look-alike cannot stand in for SBS5; the floor only asks whether the final fit used it.
   Columns below it go one at a time, smallest first, with a refit after each; at least two
   signatures survive. `None` keeps every anchor signature whatever its exposure,
-- `min_deviance_gain` (default `5`) — after the bootstrap search, a swap step and a
+- `min_deviance_gain` (default `10`) — after the bootstrap search, a swap step and a
   backward elimination scored by the Poisson deviance of the fit: an active signature is
   replaced by an inactive one when that lowers the deviance by more than this margin, and
   dropped when its removal raises it by less. The bootstrap asks whether an exposure is
   stable; this asks whether the signature is needed, and it keeps a peaked signature at a
-  few percent of the profile while dropping a flat one parked on the residual. Anchor
-  signatures are exempt; `None` disables the step,
+  few percent of the profile while dropping a flat one parked on the residual.
+  Anchor signatures are exempt; `None` disables the step,
 - `dispersion_scaled` (default `True`) — puts `min_deviance_gain` on the quasi-likelihood
   scale: the margin is multiplied by the over-dispersion of the fit against the whole
   pre-filtered panel (`max(1, deviance/df)`), which leaves Poisson-or-quieter profiles
