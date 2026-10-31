@@ -99,6 +99,15 @@ Most important parameters:
   pre-filtered panel (`max(1, deviance/df)`), which leaves Poisson-or-quieter profiles
   unchanged and keeps the step meaningful on real catalogues, where the deviance per
   degree of freedom is typically 2--11; `False` applies the margin as given,
+- `deviance_overdispersion` (default `None`, opt-in) — scales the backward-elimination
+  margin per candidate signature by its quasi-likelihood dispersion `phi_s` under an
+  over-dispersion `sigma_b` (`Var = c + (sigma_b c)^2` per channel): a peaked signature
+  parked on the high-count channels of a deep profile, where the excess variance lives,
+  must clear `min_deviance_gain * phi_s` with `phi_s` of several, while one on low-count
+  channels keeps the plain margin; `dispersion_scaled` then applies to the swap step only.
+  `"auto"` estimates `sigma_b` on the set the search settled on (leverage-corrected method
+  of moments, `estimate_overdispersion(..., leverage=True)`), which is 0, and the step
+  identical to the default, when the residual is within counting noise; a number fixes it,
 - `overdispersion` (default `None`) — over-dispersed bootstrap: each replicate first scales
   every channel by a gamma factor with this coefficient of variation, so a channel with `c`
   counts varies with SD `sqrt(c + (overdispersion * c)^2)` instead of `sqrt(c)`; on deep

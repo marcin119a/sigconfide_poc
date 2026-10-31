@@ -567,6 +567,35 @@ class TestDevianceSteps:
         assert len(off[0]) >= 2  # the plain search still runs with the step disabled
 
 
+class TestZscoreCriterion:
+    """`criterion="zscore"`: bootstrap signal-to-noise instead of the support."""
+
+    def test_zscore_basics(self):
+        from sigconfide.estimates.selection import _zscore
+
+        e = np.array([
+            [0.1, 0.1, 0.1, 0.1],      # constant positive -> inf
+            [0.0, 0.0, 0.0, 0.0],      # never used -> 0
+            [0.10, 0.12, 0.08, 0.10],  # tight -> large
+            [0.10, 0.30, 0.00, 0.00],  # wide -> small
+        ])
+        z = _zscore(e)
+        assert np.isinf(z[0]) and z[1] == 0.0
+        assert z[2] > 5 > z[3] > 0
+
+    def test_zscore_selection_recovers_the_mixture(self, simple_P, known_weights, counts_profile):
+        np.random.seed(0)
+        idx, expo, _ = hybrid_stepwise_selection(
+            counts_profile, simple_P, R=30, criterion="zscore", z_min=2.0
+        )
+        assert sorted(idx.tolist()) == [0, 1, 2]
+        assert expo == pytest.approx(known_weights, abs=0.02)
+
+    def test_invalid_criterion_raises(self, simple_P, counts_profile):
+        with pytest.raises(ValueError, match="criterion"):
+            hybrid_stepwise_selection(counts_profile, simple_P, R=10, criterion="bogus")
+
+
 class TestOverdispersionEstimate:
     """`estimate_overdispersion`: sigma_b by the method of moments on the residual."""
 
@@ -708,4 +737,103 @@ class TestAutoOverdispersion:
         with pytest.raises(ValueError, match="overdispersion"):
             hybrid_stepwise_selection(
                 counts_profile, simple_P, R=2, overdispersion="guess"
+            )
+
+
+class TestCandidateDispersion:
+    """`deviance_overdispersion`: per-candidate over-dispersion-scaled margin."""
+
+    @staticmethod
+    def _counts(P, weights, total=20000):
+        return np.round(total * (P @ weights))
+
+    def test_phi_is_one_without_overdispersion(self, simple_P):
+        from sigconfide.estimates.selection import _candidate_dispersion
+
+        e_rest = np.array([0.6, 0.4])
+        phi = _candidate_dispersion(20000, simple_P[:, [0, 2]], e_rest, simple_P[:, 1], 0.0)
+        assert phi == pytest.approx(1.0)
+
+    def test_phi_grows_with_sigma_and_is_at_least_one(self, simple_P):
+        from sigconfide.estimates.selection import _candidate_dispersion
+
+        e_rest = np.array([0.6, 0.4])
+        args = (20000, simple_P[:, [0, 2]], e_rest, simple_P[:, 1])
+        a, b, c = (_candidate_dispersion(*args, s) for s in (0.0, 0.05, 0.1))
+        assert a == pytest.approx(1.0)
+        assert 1.0 < b < c
+
+    def test_phi_scales_with_the_counts_of_the_channels(self, simple_P):
+        from sigconfide.estimates.selection import _candidate_dispersion
+
+        e_rest = np.array([0.6, 0.4])
+        small = _candidate_dispersion(2000, simple_P[:, [0, 2]], e_rest, simple_P[:, 1], 0.1)
+        large = _candidate_dispersion(200000, simple_P[:, [0, 2]], e_rest, simple_P[:, 1], 0.1)
+        assert small < large  # Var = c + (sigma c)^2: the excess grows with c
+
+    def test_leverage_estimate_is_zero_on_exact_data(self, simple_P, counts_profile):
+        assert estimate_overdispersion(counts_profile, simple_P, leverage=True) == 0.0
+
+    def test_leverage_estimate_reads_multiplicative_noise(self):
+        rng = np.random.default_rng(5)
+        P = rng.dirichlet(np.ones(24) * 0.5, size=4).T  # 24 channels, 4 peaked columns
+        clean = 200000 * (P @ np.array([0.5, 0.0, 0.3, 0.2]))
+        noisy = np.round(clean * rng.gamma(25.0, 0.04, size=len(clean)))  # CV 0.2
+        plain = estimate_overdispersion(noisy, P)
+        lev = estimate_overdispersion(noisy, P, leverage=True)
+        assert estimate_overdispersion(np.round(clean), P, leverage=True) == 0.0
+        assert 0 < plain <= lev < 0.2  # absorption pulls both below the true 0.2
+
+    def test_prune_with_zero_sigma_is_the_plain_rule(self, simple_P):
+        from sigconfide.estimates.selection import _prune_by_deviance
+
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        plain = _prune_by_deviance(counts, simple_P, [0, 1, 2], 5.0, set(), decomposeQP)
+        zero = _prune_by_deviance(
+            counts, simple_P, [0, 1, 2], 5.0, set(), decomposeQP, candidate_sigma=0.0
+        )
+        assert plain == zero == [0, 2]
+
+    def test_prune_with_a_large_sigma_drops_a_trace_signature(self, simple_P):
+        from sigconfide.estimates.selection import _prune_by_deviance
+
+        counts = self._counts(simple_P, np.array([0.59, 0.01, 0.4]))
+        kept = _prune_by_deviance(
+            counts, simple_P, [0, 1, 2], 1.0, set(), decomposeQP, candidate_sigma=0.0
+        )
+        dropped = _prune_by_deviance(
+            counts, simple_P, [0, 1, 2], 1.0, set(), decomposeQP, candidate_sigma=2.0
+        )
+        assert kept == [0, 1, 2]
+        assert dropped == [0, 2]
+
+    def test_option_zero_reproduces_the_default(self, simple_P):
+        counts = self._counts(simple_P, np.array([0.6, 0.0, 0.4]))
+        a = hybrid_stepwise_selection(counts, simple_P, R=30, rng=7)
+        b = hybrid_stepwise_selection(
+            counts, simple_P, R=30, rng=7, deviance_overdispersion=0.0
+        )
+        assert a[0].tolist() == b[0].tolist()
+        assert a[1] == pytest.approx(b[1])
+
+    def test_option_auto_is_the_default_on_exact_data(
+        self, simple_P, counts_profile, known_weights
+    ):
+        idx, expo, _ = hybrid_stepwise_selection(
+            counts_profile, simple_P, R=30, rng=7, deviance_overdispersion="auto"
+        )
+        assert sorted(idx.tolist()) == [0, 1, 2]
+        assert expo == pytest.approx(known_weights, abs=0.02)
+
+    def test_option_default_is_off(self):
+        import inspect
+
+        sig = inspect.signature(hybrid_stepwise_selection)
+        assert sig.parameters["deviance_overdispersion"].default is None
+
+    @pytest.mark.parametrize("bad", [-0.1, "foo"])
+    def test_invalid_values_raise(self, counts_profile, simple_P, bad):
+        with pytest.raises(ValueError, match="deviance_overdispersion"):
+            hybrid_stepwise_selection(
+                counts_profile, simple_P, R=2, deviance_overdispersion=bad
             )

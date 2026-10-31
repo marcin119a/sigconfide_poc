@@ -53,11 +53,32 @@ def _support(exposures):
     return (exposures > 0).sum(axis=1) / exposures.shape[1]
 
 
-def _evaluate(M, P, cols, decomposition_method):
+def _zscore(exposures):
+    """Bootstrap signal-to-noise of each exposure: mean over the replicates
+    divided by their standard deviation (a bootstrap Wald statistic).
+
+    Unlike the support, which only asks whether a replicate used the
+    signature, the z-score carries the width of the replicate distribution:
+    a flat signature that soaks up the per-channel noise of a deep profile
+    fluctuates from replicate to replicate (small z) while a peaked signature
+    is pinned by its peaks (large z), and the over-dispersed bootstrap widens
+    the former far more than the latter.  Dimensionless, so a trace exposure
+    with a tight distribution scores like a large one; a signature the QP
+    never uses has mean 0 and z = 0; a constant positive exposure has sd 0
+    and is scored +inf.
+    """
+    mean = exposures.mean(axis=1)
+    sd = exposures.std(axis=1, ddof=1) if exposures.shape[1] > 1 else np.zeros_like(mean)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        z = np.where(sd > 0, mean / np.where(sd > 0, sd, 1.0), np.where(mean > 0, np.inf, 0.0))
+    return z
+
+
+def _evaluate(M, P, cols, decomposition_method, criterion="support"):
     exposures, _ = findSigExposures(
         M, P[:, cols], decomposition_method=decomposition_method
     )
-    return _support(exposures)
+    return _zscore(exposures) if criterion == "zscore" else _support(exposures)
 
 
 def _as_counts(m, mutation_count):
@@ -74,14 +95,47 @@ def _poisson_deviance(counts, mu):
     return float(2.0 * np.sum(term - (counts - mu)))
 
 
-def _deviance_of(counts, P, cols, decomposition_method):
+def _fit_deviance(counts, P, cols, decomposition_method):
+    """Exposures of the fit against columns ``cols`` and its Poisson deviance."""
     n = counts.sum()
     exposures = decomposition_method(counts / n, P[:, cols])
-    return _poisson_deviance(counts, n * (P[:, cols] @ exposures))
+    return exposures, _poisson_deviance(counts, n * (P[:, cols] @ exposures))
+
+
+def _deviance_of(counts, P, cols, decomposition_method):
+    return _fit_deviance(counts, P, cols, decomposition_method)[1]
+
+
+def _candidate_dispersion(n, P_rest, e_rest, p_s, sigma):
+    """Quasi-likelihood scale of the deviance gain of one candidate signature.
+
+    Under the null that signature ``s`` is absent, the gain in Poisson deviance
+    from adding it is approximately ``phi_s * chi2_1`` with
+
+        phi_s = sum_k r_k^2 (1 + sigma^2 mu_k) / mu_k  /  sum_k r_k^2 / mu_k,
+
+    where ``mu`` are the fitted counts without ``s`` (floored at half a count)
+    and ``r`` the efficient score weights of ``s``: its profile scaled to ``n``
+    mutations and projected off the other active columns with Poisson weights
+    ``1/mu``, so the part of ``s`` the active set already explains does not
+    count.  Each channel's share is inflated by its over-dispersion
+    ``1 + sigma^2 mu_k`` (``Var = mu + sigma^2 mu^2`` against the Poisson
+    ``mu``): a peaked candidate sitting on high-count channels gets a large
+    ``phi_s``, a diffuse one spread over low-count channels stays near 1, and
+    ``phi_s = 1`` exactly when ``sigma = 0``.
+    """
+    mu = np.maximum(n * (P_rest @ e_rest), 0.5)
+    w = 1.0 / np.sqrt(mu)
+    beta = np.linalg.lstsq(P_rest * w[:, None], p_s * w, rcond=None)[0]
+    r = n * (p_s - P_rest @ beta)
+    info = np.sum(r**2 / mu)
+    if info <= 0:
+        return 1.0
+    return float(np.sum(r**2 * (1.0 + sigma**2 * mu) / mu) / info)
 
 
 def estimate_overdispersion(
-    m, P, mutation_count=None, decomposition_method=decomposeQP
+    m, P, mutation_count=None, decomposition_method=decomposeQP, leverage=False
 ) -> float:
     """Estimate the bootstrap over-dispersion ``sigma_b`` from the fit residual.
 
@@ -105,6 +159,16 @@ def estimate_overdispersion(
     where ``sigma_b`` decides whether flat signatures survive, ``sum c_k^2``
     is large and the estimate is precise.
 
+    The fit absorbs part of the noise, most of it in the high-count channels
+    the active signatures peak on, which the uniform ``K/(K-p)`` factor
+    understates.  With ``leverage=True`` each squared residual is instead
+    divided by ``1 - h_k``, ``h_k`` being the leverage of channel ``k`` in the
+    least-squares projection onto the columns the fit actually used, and the
+    ``K/(K-p)`` factor is dropped.  This is the estimator used for the
+    per-candidate margin of ``hybrid_stepwise_selection``
+    (``deviance_overdispersion="auto"``), where it is taken on the selected
+    set rather than the saturated panel.
+
     Args:
         m (numpy.ndarray): Profile of one sample, shape ``(K,)``; counts or
             probabilities.
@@ -116,6 +180,8 @@ def estimate_overdispersion(
             when ``m`` does not hold integer counts.
         decomposition_method (callable): Solver ``f(m, P) -> exposures``.
             Default ``decomposeQP``.
+        leverage (bool): Correct each residual for the leverage of its channel
+            instead of applying the uniform ``K/(K-p)`` factor. Default False.
 
     Returns:
         float: ``sigma_b``, a non-negative coefficient of variation.
@@ -129,8 +195,14 @@ def estimate_overdispersion(
     scale = np.sum(c**2)
     if scale <= 0:
         return 0.0
-    df = max(1, K - p)
-    sigma2 = (K / df * np.sum(d**2) - np.sum(c)) / scale
+    if leverage:
+        active = P[:, exposures > 0]
+        hat = active @ np.linalg.pinv(active.T @ active) @ active.T
+        h = np.clip(np.diag(hat), 0.0, 0.99)
+        resid = np.sum(d**2 / (1.0 - h))
+    else:
+        resid = K / max(1, K - p) * np.sum(d**2)
+    sigma2 = (resid - np.sum(c)) / scale
     return float(np.sqrt(max(0.0, sigma2)))
 
 
@@ -174,7 +246,9 @@ def _swap_by_deviance(
     return cols
 
 
-def _prune_by_deviance(counts, P, cols, min_gain, protected, decomposition_method):
+def _prune_by_deviance(
+    counts, P, cols, min_gain, protected, decomposition_method, candidate_sigma=None
+):
     """Backward elimination on Poisson deviance.
 
     Greedy loop: repeatedly drop the signature whose removal raises the
@@ -187,19 +261,36 @@ def _prune_by_deviance(counts, P, cols, min_gain, protected, decomposition_metho
     expected count and tells the two apart.  A negative cost (dropping the
     signature *lowers* the deviance, which the least-squares QP solution
     allows) always prunes.
+
+    With ``candidate_sigma`` set, the margin of each signature is
+    ``min_gain * phi_s`` with ``phi_s`` its quasi-likelihood dispersion under
+    the over-dispersion ``candidate_sigma`` (see ``_candidate_dispersion``):
+    the signatures whose cost is below their own margin are droppable, and
+    the one with the smallest cost-to-margin ratio goes first.  At
+    ``candidate_sigma = 0`` every ``phi_s`` is 1 and this is the plain rule.
     """
     cols = list(cols)
+    n = counts.sum()
     while len(cols) > 2:
         base = _deviance_of(counts, P, cols, decomposition_method)
-        worst, worst_cost = None, None
+        worst, worst_key = None, None
         for s in cols:
             if s in protected:
                 continue
             kept = [c for c in cols if c != s]
-            cost = _deviance_of(counts, P, kept, decomposition_method) - base
-            if worst_cost is None or cost < worst_cost:
-                worst, worst_cost = s, cost
-        if worst is None or worst_cost >= min_gain:
+            e_rest, dev_rest = _fit_deviance(counts, P, kept, decomposition_method)
+            margin = min_gain
+            if candidate_sigma is not None:
+                margin *= _candidate_dispersion(
+                    n, P[:, kept], e_rest, P[:, s], candidate_sigma
+                )
+            cost = dev_rest - base
+            if cost >= margin:
+                continue
+            key = cost / margin if margin > 0 else cost
+            if worst_key is None or key < worst_key:
+                worst, worst_key = s, key
+        if worst is None:
             break
         cols.remove(worst)
     return cols
@@ -247,8 +338,11 @@ def hybrid_stepwise_selection(
     overdispersion=None,
     min_deviance_gain=10.0,
     dispersion_scaled=True,
+    deviance_overdispersion=None,
     anchor_floor=0.002,
     rng=None,
+    criterion="support",
+    z_min=2.0,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Select the active signatures of one sample with a bootstrap stepwise search.
 
@@ -314,6 +408,20 @@ def hybrid_stepwise_selection(
             filters the latter is a no-op on the former. The floor at 1
             leaves Poisson-or-quieter profiles exactly as with
             ``dispersion_scaled=False``. Default True.
+        deviance_overdispersion (float | "auto" | None): Scale the margin of
+            the backward elimination per candidate signature by its
+            quasi-likelihood dispersion ``phi_s`` under an over-dispersion
+            ``sigma_b`` (``Var = c + (sigma_b c)^2`` per channel, see
+            ``_candidate_dispersion``): a peaked signature parked on the
+            high-count channels of a deep profile, where the excess variance
+            lives, must clear ``min_deviance_gain * phi_s`` with ``phi_s`` of
+            several, while a signature on low-count channels keeps the plain
+            margin. The global ``dispersion_scaled`` factor then applies to
+            the swap step only. ``"auto"`` estimates ``sigma_b`` on the set
+            the search settled on with the leverage-corrected method of
+            moments; it is 0, and the step identical to the default, when the
+            residual is within counting noise. A number fixes ``sigma_b``.
+            None (default) leaves the margin as it is. Opt-in (2026-10-31).
         anchor_floor (float | None): Relative exposure below which an
             anchor signature is dropped from the final answer. The anchor
             set is carried through the search unconditionally, so that a
@@ -322,6 +430,17 @@ def hybrid_stepwise_selection(
             actually used the anchored column. Columns below the floor are
             removed one at a time, the smallest first, with a refit after
             each, and at least two signatures always survive. Default 0.002.
+        criterion ("support" | "zscore"): Statistic the greedy search scores
+            a signature with. ``"support"`` (default) is the fraction of
+            replicates with a positive exposure, cut at ``min_support``.
+            ``"zscore"`` is the bootstrap signal-to-noise of the exposure
+            (mean over replicates / their standard deviation, see
+            ``_zscore``), cut at ``z_min``; it uses the width of the replicate
+            distribution, so the over-dispersed bootstrap enters the
+            selection, not only the interval. Experimental (2026-10-31).
+        z_min (float): Cutoff for ``criterion="zscore"``: a signature is kept
+            or added when its z-score reaches it. Default 2.0, roughly a
+            one-sided test at 2.5 %.
         rng (None | int | SeedSequence | Generator): Source of the bootstrap
             draws. None uses the global ``np.random``. Anything else goes
             through ``np.random.default_rng`` and leaves the global state alone;
@@ -336,9 +455,22 @@ def hybrid_stepwise_selection(
         error (Frobenius norm).
     """
     N = P.shape[1]
+    if criterion not in ("support", "zscore"):
+        raise ValueError("'criterion' must be 'support' or 'zscore'.")
+    cutoff = min_support if criterion == "support" else float(z_min)
     _anchors = list(anchor_indices) if anchor_indices is not None else []
     if min_deviance_gain is not None and min_deviance_gain < 0:
         raise ValueError("'min_deviance_gain' must be a non-negative deviance margin.")
+    if (
+        isinstance(deviance_overdispersion, str) and deviance_overdispersion != "auto"
+    ) or (
+        not isinstance(deviance_overdispersion, str)
+        and deviance_overdispersion is not None
+        and deviance_overdispersion < 0
+    ):
+        raise ValueError(
+            "'deviance_overdispersion' must be a non-negative number, 'auto' or None."
+        )
 
     # --- optional pre-filter ------------------------------------------------
     if pre_filter_threshold is not None:
@@ -388,13 +520,13 @@ def hybrid_stepwise_selection(
         # Anchor signatures are protected — skip them.
         if len(selected) > 2:
             sup = _evaluate(
-                M, P, np.array(current_cols), decomposition_method
+                M, P, np.array(current_cols), decomposition_method, criterion
             )
             sup_map = {col: sup[i] for i, col in enumerate(current_cols)}
             for s in selected:
                 if s in anchor_local:  # anchors are never evicted
                     continue
-                benefit = min_support - sup_map[s]
+                benefit = cutoff - sup_map[s]
                 if benefit > best_benefit:
                     best_benefit = benefit
                     best_move = ("remove", s)
@@ -402,9 +534,9 @@ def hybrid_stepwise_selection(
         # Forward: add one discarded signature
         for s in set(range(N)) - selected:
             test_cols = np.array(sorted(selected | {s}))
-            sup = _evaluate(M, P, test_cols, decomposition_method)
+            sup = _evaluate(M, P, test_cols, decomposition_method, criterion)
             s_pos = list(test_cols).index(s)
-            benefit = sup[s_pos] - min_support
+            benefit = sup[s_pos] - cutoff
             if benefit > best_benefit:
                 best_benefit = benefit
                 best_move = ("add", s)
@@ -440,14 +572,30 @@ def hybrid_stepwise_selection(
                 decomposition_method,
             )
         )
+        prune_margin, candidate_sigma = margin, None
+        if deviance_overdispersion is not None:
+            # The per-candidate phi_s carries the dispersion, so the margin
+            # goes in unscaled; "auto" reads sigma_b off the set the search
+            # settled on, leverage-corrected (see estimate_overdispersion).
+            prune_margin = min_deviance_gain
+            candidate_sigma = deviance_overdispersion
+            if candidate_sigma == "auto":
+                candidate_sigma = estimate_overdispersion(
+                    m,
+                    P[:, sorted(selected)],
+                    mutation_count,
+                    decomposition_method,
+                    leverage=True,
+                )
         selected = set(
             _prune_by_deviance(
                 counts,
                 P,
                 sorted(selected),
-                margin,
+                prune_margin,
                 anchor_local,
                 decomposition_method,
+                candidate_sigma=candidate_sigma,
             )
         )
 
