@@ -1,40 +1,7 @@
-"""Selection of the active signatures of one sample, and the uncertainty of their exposures.
-
-The active set is found by a forward-backward search on the Poisson deviance of
-the fit: starting from the anchor signatures, a signature is added when it
-lowers the deviance by at least a margin and removed when it accounts for less
-than that margin, the margin being ``min_deviance_gain`` scaled by the
-quasi-Poisson dispersion of the saturated fit.  The search is deterministic.
-
-The bootstrap enters only afterwards: ``exposure_intervals`` reports percentile
-intervals of the selected exposures and ``selection_stability`` the fraction of
-replicates in which each signature is selected again, both from an
-over-dispersed resampling of the profile whose dispersion is estimated on the
-selected set.
-"""
-
 import numpy as np
 from sigconfide.decompose.qp import decomposeQP
 from sigconfide.estimates.standard import findSigExposures
 from sigconfide.utils.utils import is_wholenumber, resolve_rng
-
-
-# ---------------------------------------------------------------- profiles ---
-def _mutation_count(m, mutation_count):
-    """The total mutation count: as given, or the sum of whole-number counts."""
-    if mutation_count is not None:
-        return mutation_count
-    if all(is_wholenumber(v) for v in m):
-        return int(m.sum())
-    raise ValueError(
-        "Specify 'mutation_count' or provide integer mutation counts in 'm'."
-    )
-
-
-def _as_counts(m, mutation_count):
-    """The profile as mutation counts."""
-    m = np.asarray(m, dtype=float)
-    return m / m.sum() * _mutation_count(m, mutation_count)
 
 
 def _bootstrap_matrix(m, mutation_count, R, overdispersion=None, rng=None):
@@ -49,7 +16,13 @@ def _bootstrap_matrix(m, mutation_count, R, overdispersion=None, rng=None):
     """
     rng = resolve_rng(rng)
     K = len(m)
-    mutation_count = _mutation_count(m, mutation_count)
+    if mutation_count is None:
+        if all(is_wholenumber(v) for v in m):
+            mutation_count = int(m.sum())
+        else:
+            raise ValueError(
+                "Specify 'mutation_count' or provide integer mutation counts in 'm'."
+            )
     m = m / m.sum()
     if overdispersion is not None and overdispersion < 0:
         raise ValueError(
@@ -66,389 +39,229 @@ def _bootstrap_matrix(m, mutation_count, R, overdispersion=None, rng=None):
     return counts.T / mutation_count
 
 
-# ---------------------------------------------------------------- deviance ---
-def _poisson_deviance(counts, mu):
-    """Poisson deviance of observed counts against fitted means ``mu``."""
-    mu = np.maximum(mu, 1e-3)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        term = np.where(counts > 0, counts * np.log(counts / mu), 0.0)
-    return float(2.0 * np.sum(term - (counts - mu)))
+def _support(exposures, threshold):
+    """Bootstrap support: fraction of replicates where exposure exceeds threshold."""
+    return (exposures > threshold).sum(axis=1) / exposures.shape[1]
 
 
-def _fit_deviance(counts, P, cols, decomposition_method):
-    """Exposures of the fit against columns ``cols`` and its Poisson deviance."""
-    n = counts.sum()
-    exposures = decomposition_method(counts / n, P[:, cols])
-    return exposures, _poisson_deviance(counts, n * (P[:, cols] @ exposures))
+def _evaluate(M, P, cols, threshold, decomposition_method):
+    exposures, _ = findSigExposures(
+        M, P[:, cols], decomposition_method=decomposition_method
+    )
+    return _support(exposures, threshold)
 
 
-def _deviance_of(counts, P, cols, decomposition_method):
-    return _fit_deviance(counts, P, cols, decomposition_method)[1]
+def _reconstruction_cosine(m_norm, P, cols, decomposition_method):
+    exposures = decomposition_method(m_norm, P[:, cols])
+    reconstruction = P[:, cols] @ exposures
+    denom = np.linalg.norm(m_norm) * np.linalg.norm(reconstruction)
+    return float(m_norm @ reconstruction / denom) if denom > 0 else 0.0
 
 
-def _saturated_fit(counts, P, anchors, decomposition_method):
-    """The saturated fit: exposures against the whole panel, its active columns
-    (positive exposure, plus the anchors; at least two) and its quasi-Poisson
-    dispersion ``phi = deviance / (K - p)`` taken on those columns.
+def _prune_by_fit_gain(m_norm, P, cols, min_gain, protected, decomposition_method):
+    """Drop signatures that the reconstruction does not actually need.
 
-    A panel can hold more signatures than contexts, so the fit against all of
-    them is not identifiable; the columns the QP actually uses are the largest
-    identifiable model and carry the dispersion estimate.
+    The bootstrap support measures how *stable* an exposure is, not whether the
+    signature earns its place in the fit.  On deep profiles the two come apart:
+    bootstrap variance shrinks with the mutation count, so a signature parked at
+    a few percent is stably above `threshold` in every replicate and is kept
+    even when removing it costs nothing.
+
+    Greedy backward elimination: repeatedly drop the signature whose removal
+    costs the least reconstruction cosine, while that cost stays below
+    `min_gain`.  Protected (mandatory) signatures are never dropped and at least
+    two signatures always survive.
     """
-    n = counts.sum()
-    exposures = decomposition_method(counts / n, P)
-    active = set(np.where(exposures > 0)[0].tolist()) | set(anchors)
-    if len(active) < 2:
-        active |= set(int(j) for j in np.argsort(exposures)[-2:])
-    cols = sorted(active)
-    df = max(1, P.shape[0] - len(cols))
-    phi = _deviance_of(counts, P, cols, decomposition_method) / df
-    return exposures, np.array(cols), phi
-
-
-def saturated_dispersion(
-    m, P, mutation_count=None, anchor_indices=None, decomposition_method=decomposeQP
-) -> float:
-    """Quasi-Poisson dispersion of the saturated fit, ``deviance / (K - p)``.
-
-    ``p`` counts the columns the fit against the whole panel actually uses
-    (positive exposure) plus the anchors. It is 1 for Poisson counts, below 1
-    for a catalogue quieter than Poisson and above 1 for an over-dispersed
-    one; ``hybrid_stepwise_selection`` multiplies its margin by ``max(1, phi)``.
-    """
-    counts = _as_counts(m, mutation_count)
-    anchors = [int(i) for i in (anchor_indices or [])]
-    return float(_saturated_fit(counts, P, anchors, decomposition_method)[2])
-
-
-def estimate_overdispersion(
-    m, P, mutation_count=None, decomposition_method=decomposeQP, leverage=False
-) -> float:
-    """Estimate the bootstrap over-dispersion ``sigma_b`` from the fit residual.
-
-    The over-dispersed bootstrap varies a channel with expected count ``c``
-    by ``Var = c + (sigma_b c)^2``, which is linear in ``sigma_b^2``, so the
-    residual of a fit gives ``sigma_b`` by the method of moments (the classic
-    negative-binomial dispersion estimator).  With ``c_k = n (P e)_k`` the
-    fitted counts of the QP solution against the ``p`` columns of ``P`` and
-    ``d_k = X_k - c_k`` the residuals,
-
-        sigma_b^2 = max{ 0, ( K/(K-p) * sum d_k^2 - sum c_k ) / sum c_k^2 }.
-
-    The part of the residual that counting noise explains (``sum c_k``) is
-    taken out and the rest is normalised by ``sum c_k^2``; ``K/(K-p)`` is
-    the degrees-of-freedom correction for the fitted parameters.  A residual
-    within Poisson noise gives 0, which recovers the plain multinomial
-    bootstrap.
-
-    The fit absorbs part of the noise, most of it in the high-count channels
-    the active signatures peak on, which the uniform ``K/(K-p)`` factor
-    understates.  With ``leverage=True`` each squared residual is instead
-    divided by ``1 - h_k``, ``h_k`` being the leverage of channel ``k`` in the
-    least-squares projection onto the columns the fit actually used, and the
-    ``K/(K-p)`` factor is dropped.  Taken on the selected set, this is the
-    estimate behind ``exposure_intervals`` and ``selection_stability``.
-
-    Args:
-        m (numpy.ndarray): Profile of one sample, shape ``(K,)``; counts or
-            probabilities.
-        P (numpy.ndarray): The panel to fit, shape ``(K, p)``: the set the
-            residual is taken against.
-        mutation_count (int, optional): Total number of mutations. Required
-            when ``m`` does not hold integer counts.
-        decomposition_method (callable): Solver ``f(m, P) -> exposures``.
-            Default ``decomposeQP``.
-        leverage (bool): Correct each residual for the leverage of its channel
-            instead of applying the uniform ``K/(K-p)`` factor. Default False.
-
-    Returns:
-        float: ``sigma_b``, a non-negative coefficient of variation.
-    """
-    counts = _as_counts(m, mutation_count)
-    n = counts.sum()
-    K, p = P.shape
-    exposures = decomposition_method(counts / n, P)
-    c = n * (P @ exposures)
-    d = counts - c
-    scale = np.sum(c**2)
-    if scale <= 0:
-        return 0.0
-    if leverage:
-        active = P[:, exposures > 0]
-        hat = active @ np.linalg.pinv(active.T @ active) @ active.T
-        h = np.clip(np.diag(hat), 0.0, 0.99)
-        resid = np.sum(d**2 / (1.0 - h))
-    else:
-        resid = K / max(1, K - p) * np.sum(d**2)
-    sigma2 = (resid - np.sum(c)) / scale
-    return float(np.sqrt(max(0.0, sigma2)))
-
-
-# ---------------------------------------------------------------- search -----
-def _forward_backward(
-    counts, P, start, margin, protected, decomposition_method, max_iterations
-):
-    """Best-first forward-backward search on the Poisson deviance.
-
-    From ``start``, each iteration scores every single move: adding an
-    inactive signature, whose benefit is its deviance gain over the margin,
-    ``(gain - margin) / margin``, and removing an active unprotected one,
-    whose benefit is the margin over its cost, ``(margin - cost) / margin``;
-    the move with the largest positive benefit is applied.  The search stops
-    when no move has a positive benefit, when the best move would revisit a
-    set already seen (oscillation guard) or after ``max_iterations``.  At
-    least two signatures stay active.
-    """
-    cols = sorted(start)
-    active = set(cols)
-    N = P.shape[1]
-    visited = {frozenset(cols)}
-    for _ in range(max_iterations):
-        base = _deviance_of(counts, P, cols, decomposition_method)
-        best_benefit, best_move = 0.0, None
-        if len(cols) > 2:
-            for s in cols:
-                if s in protected:
-                    continue
-                kept = [c for c in cols if c != s]
-                cost = _deviance_of(counts, P, kept, decomposition_method) - base
-                benefit = (margin - cost) / margin
-                if benefit > best_benefit:
-                    best_benefit, best_move = benefit, ("remove", s)
-        for s in range(N):
-            if s in active:
-                continue
-            gain = base - _deviance_of(counts, P, sorted(cols + [s]), decomposition_method)
-            benefit = (gain - margin) / margin
-            if benefit > best_benefit:
-                best_benefit, best_move = benefit, ("add", s)
-        if best_move is None:
-            break
-        action, s = best_move
-        candidate = active - {s} if action == "remove" else active | {s}
-        if frozenset(candidate) in visited:
-            break
-        active = candidate
-        cols = sorted(active)
-        visited.add(frozenset(cols))
-    return cols
-
-
-def _apply_anchor_floor(
-    m, P, cols, exposures, errors, protected, floor, decomposition_method
-):
-    """Drop anchor signatures whose final relative exposure is below `floor`.
-
-    An anchor signature is carried through the search unconditionally so
-    that a trace of it is fitted at all and a look-alike cannot stand in for
-    it; this last step asks whether the fit actually used it.  One column at
-    a time, the smallest exposure first, refitting after each removal because
-    the remaining exposures shift; at least two signatures always survive.
-    """
-    cols = np.asarray(cols)
+    cols = list(cols)
     while len(cols) > 2:
-        below = [
-            (exposures[i], i)
-            for i, c in enumerate(cols)
-            if c in protected and exposures[i] < floor
-        ]
-        if not below:
+        base = _reconstruction_cosine(m_norm, P, cols, decomposition_method)
+        worst, worst_cost = None, None
+        for s in cols:
+            if s in protected:
+                continue
+            kept = [c for c in cols if c != s]
+            if len(kept) < 2:
+                continue
+            cost = base - _reconstruction_cosine(m_norm, P, kept, decomposition_method)
+            if worst_cost is None or cost < worst_cost:
+                worst, worst_cost = s, cost
+        if worst is None or worst_cost >= min_gain:
             break
-        _, i_drop = min(below)
-        cols = np.delete(cols, i_drop)
-        exposures, errors = findSigExposures(
-            m.reshape(-1, 1), P[:, cols], decomposition_method=decomposition_method
-        )
-        exposures = exposures.flatten()
-    return cols, exposures, errors
+        cols.remove(worst)
+    return cols
 
 
 def hybrid_stepwise_selection(
     m,
     P,
+    R,
     mutation_count=None,
-    anchor_indices=None,
-    min_deviance_gain=10.0,
-    dispersion_scaled=True,
-    anchor_floor=0.002,
+    threshold=0.01,
+    min_support=0.95,
     decomposition_method=decomposeQP,
-    max_iterations=200,
+    pre_filter_threshold=0.001,
+    mandatory_indices=None,
+    max_iterations=1000,
+    min_fit_improvement=None,
+    overdispersion=None,
+    rng=None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Select the active signatures of one sample by a forward-backward search
-    on the Poisson deviance of the fit.
+    """Select the active signatures of one sample with a bootstrap stepwise search.
 
-    The search starts from the anchor signatures (or, with fewer than two
-    anchors, from the strongest columns of the saturated fit) and considers
-    every single move over the whole panel: a signature enters when it lowers
-    the Poisson deviance of the fit by at least the margin and leaves when it
-    accounts for less than the margin, the best move first, until none
-    qualifies (see ``_forward_backward``).  The margin is
-    ``min_deviance_gain * max(1, phi)`` with ``phi`` the quasi-Poisson
-    dispersion of the saturated fit (``saturated_dispersion``), so a
-    catalogue that is noisier than Poisson needs a proportionally larger gain.
-    The procedure is deterministic: no resampling, no seed.
+    The bootstrap support of a signature is the fraction of bootstrap
+    replicates in which its exposure exceeds ``threshold``. It is a stability
+    measure, not a significance test. The search starts from the full
+    (pre-filtered) panel and, in each iteration, applies the single best move:
+    removing an active signature whose support is below ``min_support``,
+    or adding an inactive one whose support (once added) is above it. It stops
+    when no move helps, when a move would revisit an already-seen active set
+    (oscillation guard) or after ``max_iterations``. The bootstrap replicates
+    are drawn once and reused for the whole search.
 
     Args:
         m (numpy.ndarray): Profile of one sample, shape ``(K,)``; counts or
             probabilities.
         P (numpy.ndarray): Signature panel, shape ``(K, N)``.
+        R (int): Number of bootstrap replicates.
         mutation_count (int, optional): Total number of mutations. Required
             when ``m`` does not hold integer counts.
-        anchor_indices (list[int] | None): Column indices of ``P`` anchored
-            in the model: the search starts from them and never removes them.
-            They face one check at the end, see ``anchor_floor``. Useful for
-            ubiquitous signatures such as SBS1 and SBS5.
-        min_deviance_gain (float): The deviance margin ``gamma_0`` a signature
-            must clear, before the dispersion scaling. Default 10: under
-            Poisson noise the gain of an absent signature is at most a
-            ``chi2_1`` draw, which exceeds 10 with probability 0.0016, about
-            the 95th percentile of the largest gain among a hundred absent
-            candidates, and about ``log n`` (the BIC penalty) for a few
-            thousand mutations.
-        dispersion_scaled (bool): Multiply the margin by ``max(1, phi)``, the
-            quasi-Poisson dispersion of the saturated fit, so that the margin
-            keeps its meaning on over-dispersed catalogues; Poisson-or-quieter
-            profiles are left at ``min_deviance_gain``. Default True.
-        anchor_floor (float | None): Relative exposure below which an anchor
-            signature is dropped from the final answer: the anchor is carried
-            through the search unconditionally, so that a trace of SBS1 is
-            fitted at all and a look-alike cannot stand in for SBS5; this last
-            step asks whether the final fit actually used it. Columns below
-            the floor go one at a time, the smallest first, with a refit after
-            each; at least two signatures survive. Default 0.002; None keeps
-            every anchor.
+        threshold (float): Exposure above which a signature counts as present
+            in a replicate. Default 0.01.
+        min_support (float): Bootstrap support cutoff for adding or removing a
+            signature. Default 0.95.
         decomposition_method (callable): Solver ``f(m, P) -> exposures``.
             Default ``decomposeQP``.
-        max_iterations (int): Cap on the number of moves. Default 200.
+        pre_filter_threshold (float | None): Run one QP on the original profile
+            first and discard signatures with exposure below this value before
+            the bootstrap loop. The default 0.001 showed zero recall loss on
+            typical COSMIC data while reducing N about 4x. None disables it.
+        mandatory_indices (list[int] | None): Column indices of ``P`` that are
+            always active: they survive the pre-filter, are present from the
+            first iteration and are never removed. Useful for ubiquitous
+            signatures such as SBS1 and SBS5.
+        max_iterations (int): Hard cap on add/remove moves, a last-resort guard
+            against oscillation on degenerate low-count profiles. Default 1000.
+        min_fit_improvement (float | None): If set, follow the search with a
+            backward elimination that drops any signature whose removal costs
+            less than this much reconstruction cosine. The bootstrap asks
+            whether an exposure is stable; this asks whether it is needed.
+            0.002 was validated on ICGC-BRCA (mean MCC 0.51 -> 0.63).
+            Mandatory signatures are exempt. None disables it.
+        overdispersion (float | None): Coefficient of variation of a per-channel
+            gamma multiplier applied before every bootstrap draw (see
+            ``_bootstrap_matrix``), so a channel with ``c`` counts varies with
+            SD ``sqrt(c + (overdispersion * c)^2)``. Prevents flat signatures
+            from surviving on deep profiles. None means plain multinomial.
+        rng (None | int | SeedSequence | Generator): Source of the bootstrap
+            draws. None uses the global ``np.random``. Anything else goes
+            through ``np.random.default_rng`` and leaves the global state alone;
+            give each sample its own child of
+            ``np.random.SeedSequence(seed).spawn(n_samples)`` for reproducible
+            parallel runs.
 
     Returns:
         tuple[numpy.ndarray, numpy.ndarray, numpy.ndarray]: ``(indices,
-        exposures, errors)``: indices of the selected columns of ``P``, their
-        relative exposures (summing to 1) and the reconstruction error
-        (Frobenius norm).
+        exposures, errors)``: indices of the selected columns in the original
+        ``P``, their relative exposures (summing to 1) and the reconstruction
+        error (Frobenius norm).
     """
-    m = np.asarray(m, dtype=float)
-    if min_deviance_gain is None or min_deviance_gain <= 0:
-        raise ValueError("'min_deviance_gain' must be a positive deviance margin.")
-    anchors = sorted(set(int(i) for i in (anchor_indices or [])))
-    counts = _as_counts(m, mutation_count)
-    saturated, _, phi = _saturated_fit(counts, P, anchors, decomposition_method)
-    margin = min_deviance_gain * (max(1.0, phi) if dispersion_scaled else 1.0)
+    N = P.shape[1]
+    _mandatory = list(mandatory_indices) if mandatory_indices is not None else []
 
-    start = list(anchors)
-    for j in np.argsort(saturated)[::-1]:
-        if len(start) >= 2:
-            break
-        if int(j) not in start:
-            start.append(int(j))
-
-    cols = _forward_backward(
-        counts, P, start, margin, set(anchors), decomposition_method, max_iterations
-    )
-    indices = np.array(sorted(cols))
-    exposures, errors = findSigExposures(
-        m.reshape(-1, 1), P[:, indices], decomposition_method=decomposition_method
-    )
-    exposures = exposures.flatten()
-    if anchor_floor is not None and anchors:
-        indices, exposures, errors = _apply_anchor_floor(
-            m, P, indices, exposures, errors, set(anchors), anchor_floor,
-            decomposition_method,
-        )
-    return indices, exposures, errors
-
-
-# ---------------------------------------------------------------- bootstrap --
-def _resolve_sigma(counts, Pf, overdispersion, decomposition_method):
-    if isinstance(overdispersion, str):
-        if overdispersion != "auto":
-            raise ValueError(
-                "'overdispersion' must be a non-negative number, 'auto' or None."
-            )
-        if Pf.shape[1] < 2:
-            return 0.0
-        return estimate_overdispersion(
-            counts, Pf, int(round(counts.sum())), decomposition_method, leverage=True
-        )
-    if overdispersion is None:
-        return 0.0
-    if overdispersion < 0:
-        raise ValueError(
-            "'overdispersion' must be a non-negative number, 'auto' or None."
-        )
-    return float(overdispersion)
-
-
-def exposure_intervals(
-    m,
-    P,
-    indices,
-    B=100,
-    overdispersion="auto",
-    level=0.90,
-    mutation_count=None,
-    decomposition_method=decomposeQP,
-    rng=None,
-) -> dict:
-    """Bootstrap percentile intervals of the exposures of a selected set.
-
-    ``B`` replicates of the profile are drawn (``_bootstrap_matrix``) and the
-    selected signatures are refitted on each; the interval of a signature is
-    the central ``level`` share of its replicate exposures.  With
-    ``overdispersion="auto"`` the replicates are over-dispersed by the
-    ``sigma_b`` estimated on the selected set with the leverage-corrected
-    method of moments (``estimate_overdispersion``), which is 0, the plain
-    multinomial bootstrap, when the residual is within counting noise; a
-    number fixes ``sigma_b`` and None is the multinomial bootstrap.
-
-    Returns:
-        dict: ``lower`` and ``upper`` bounds and ``sd`` of the relative
-        exposures (arrays aligned with ``indices``), ``sigma_b`` used, and the
-        ``replicates`` matrix, shape ``(len(indices), B)``.
-    """
-    m = np.asarray(m, dtype=float)
-    indices = np.asarray(indices, dtype=int)
-    counts = _as_counts(m, mutation_count)
-    n = int(round(counts.sum()))
-    Pf = P[:, indices]
-    sigma = _resolve_sigma(counts, Pf, overdispersion, decomposition_method)
-    if len(indices) == 1:
-        rep = np.ones((1, B))
+    # --- optional pre-filter ------------------------------------------------
+    if pre_filter_threshold is not None:
+        m_norm = m / m.sum()
+        init_exp = decomposition_method(m_norm, P)
+        keep_mask = init_exp > pre_filter_threshold
+        for idx in _mandatory:  # mandatory sigs always survive pre-filter
+            keep_mask[idx] = True
+        keep = np.where(keep_mask)[0]
+        if len(keep) < 2:  # safety: need at least 2 sigs
+            keep = np.argsort(init_exp)[-2:]
+        P = P[:, keep]
+        N = P.shape[1]
+        # remap mandatory global indices → local indices in filtered P
+        keep_list = keep.tolist()
+        mandatory_local = set(keep_list.index(i) for i in _mandatory if i in keep_list)
     else:
-        M = _bootstrap_matrix(counts, n, B, sigma if sigma > 0 else None, rng)
-        rep, _ = findSigExposures(M, Pf, decomposition_method=decomposition_method)
-    alpha = (1.0 - level) / 2.0
-    return {
-        "lower": np.quantile(rep, alpha, axis=1),
-        "upper": np.quantile(rep, 1.0 - alpha, axis=1),
-        "sd": rep.std(axis=1, ddof=1) if B > 1 else np.zeros(len(indices)),
-        "sigma_b": sigma,
-        "replicates": rep,
-    }
+        keep = None
+        mandatory_local = set(_mandatory)
+    # ------------------------------------------------------------------------
 
+    M = _bootstrap_matrix(m, mutation_count, R, overdispersion, rng)
+    # Mandatory sigs are in `selected` from the start (same as all others since
+    # we begin with the full set, but the backward step will never evict them).
+    selected = set(range(N))
 
-def selection_stability(
-    m, P, B=100, overdispersion="auto", mutation_count=None, rng=None, **selection_kwargs
-) -> np.ndarray:
-    """Fraction of bootstrap replicates in which each signature is selected.
+    # Active sets already visited by the greedy search.  The search moves one
+    # signature at a time and can undo an earlier move, so without this the
+    # loop can cycle indefinitely (observed on profiles with a handful of
+    # mutations, where bootstrap supports flip around the cutoff).
+    visited = {frozenset(selected)}
 
-    The selection is run once on the profile and then again on each of ``B``
-    replicates (over-dispersed by the ``sigma_b`` of the selected set, as in
-    ``exposure_intervals``); the result, one value per column of ``P``, is
-    how often the search picks that signature under resampling.  Keyword
-    arguments go to ``hybrid_stepwise_selection``.
-    """
-    m = np.asarray(m, dtype=float)
-    counts = _as_counts(m, mutation_count)
-    n = int(round(counts.sum()))
-    method = selection_kwargs.get("decomposition_method", decomposeQP)
-    indices, _, _ = hybrid_stepwise_selection(counts, P, mutation_count=n, **selection_kwargs)
-    sigma = _resolve_sigma(counts, P[:, indices], overdispersion, method)
-    M = _bootstrap_matrix(counts, n, B, sigma if sigma > 0 else None, rng)
-    freq = np.zeros(P.shape[1])
-    for b in range(B):
-        idx, _, _ = hybrid_stepwise_selection(
-            M[:, b] * n, P, mutation_count=n, **selection_kwargs
+    for _ in range(max_iterations):
+        best_benefit = 0.0
+        best_move = None
+        current_cols = sorted(selected)
+
+        # Backward: try removing one selected signature.
+        # Mandatory signatures are protected — skip them.
+        if len(selected) > 2:
+            sup = _evaluate(
+                M, P, np.array(current_cols), threshold, decomposition_method
+            )
+            sup_map = {col: sup[i] for i, col in enumerate(current_cols)}
+            for s in selected:
+                if s in mandatory_local:  # ← SPA-style: never evict
+                    continue
+                benefit = min_support - sup_map[s]
+                if benefit > best_benefit:
+                    best_benefit = benefit
+                    best_move = ("remove", s)
+
+        # Forward: add one discarded signature
+        for s in set(range(N)) - selected:
+            test_cols = np.array(sorted(selected | {s}))
+            sup = _evaluate(M, P, test_cols, threshold, decomposition_method)
+            s_pos = list(test_cols).index(s)
+            benefit = sup[s_pos] - min_support
+            if benefit > best_benefit:
+                best_benefit = benefit
+                best_move = ("add", s)
+
+        if best_move is None:
+            break
+
+        action, sig = best_move
+        candidate = selected - {sig} if action == "remove" else selected | {sig}
+        if frozenset(candidate) in visited:
+            # The best move would return the search to an active set it has
+            # already evaluated: the greedy walk is oscillating, so stop here
+            # and keep the current set rather than looping forever.
+            break
+
+        selected = candidate
+        visited.add(frozenset(selected))
+
+    if min_fit_improvement is not None:
+        selected = set(
+            _prune_by_fit_gain(
+                m / m.sum(),
+                P,
+                sorted(selected),
+                min_fit_improvement,
+                mandatory_local,
+                decomposition_method,
+            )
         )
-        freq[idx] += 1.0
-    return freq / B
+
+    local_indices = np.array(sorted(selected))
+
+    # map back to original P column indices (identity when pre_filter disabled)
+    global_indices = (
+        keep[local_indices] if pre_filter_threshold is not None else local_indices
+    )
+    exposures, errors = findSigExposures(
+        m.reshape(-1, 1), P[:, local_indices], decomposition_method=decomposition_method
+    )
+    return global_indices, exposures.flatten(), errors

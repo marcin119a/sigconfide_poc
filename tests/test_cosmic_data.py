@@ -72,10 +72,13 @@ class TestDecomposeQPRankDeficient:
 
 
 class TestHybridSelectionOnCosmic:
-    def test_recovers_true_signatures(self, cosmic, P):
+    def test_prefilter_recovers_true_signatures(self, cosmic, P):
         sigs = list(cosmic.columns)
         m = _mixture_counts(cosmic, {"SBS1": 0.3, "SBS5": 0.3, "SBS4": 0.4})
-        sel_idx, exposures, errors = hybrid_stepwise_selection(m, P)
+        np.random.seed(0)
+        sel_idx, exposures, errors = hybrid_stepwise_selection(
+            m, P, R=20, pre_filter_threshold=0.001
+        )
         selected = {sigs[i] for i in sel_idx}
         assert {"SBS1", "SBS4", "SBS5"} <= selected
         assert exposures.sum() == pytest.approx(1.0)

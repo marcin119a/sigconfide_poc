@@ -1,16 +1,29 @@
 import numpy as np
 import pytest
-from sigconfide.decompose.qp import decomposeQP
 from sigconfide.estimates.selection import (
     _bootstrap_matrix,
-    _forward_backward,
-    _poisson_deviance,
-    estimate_overdispersion,
-    exposure_intervals,
+    _support,
     hybrid_stepwise_selection,
-    saturated_dispersion,
-    selection_stability,
 )
+
+
+class TestSupport:
+    def test_known_matrix(self):
+        # rows = signatures, cols = bootstrap replicates.
+        exposures = np.array(
+            [
+                [0.5, 0.5, 0.0],  # 2/3 replicates above threshold -> support = 2/3
+                [0.0, 0.0, 0.0],  # 0/3 replicates above threshold -> support = 0.0
+                [0.2, 0.2, 0.2],  # 3/3 replicates above threshold -> support = 1.0
+            ]
+        )
+        sup = _support(exposures, threshold=0.1)
+        assert sup == pytest.approx([2 / 3, 0.0, 1.0])
+
+    def test_bounds(self):
+        exposures = np.random.default_rng(0).random((4, 10))
+        sup = _support(exposures, threshold=0.5)
+        assert np.all((sup >= 0.0) & (sup <= 1.0))
 
 
 class TestBootstrapMatrix:
@@ -144,8 +157,6 @@ class TestBootstrapRng:
             _bootstrap_matrix(counts_profile, None, 5, rng="seed")
 
 
-
-
 @pytest.fixture
 def selection_panel():
     """A 6-context x 5-signature panel with well-separated columns."""
@@ -163,207 +174,287 @@ def selection_panel():
     return P / P.sum(axis=0)
 
 
-
-def _counts(P, weights, total=20000):
-    return np.round(total * (P @ weights))
-
-
-class TestDeviance:
-    def test_poisson_deviance_is_zero_at_the_data_and_positive_elsewhere(self):
-        x = np.array([10.0, 0.0, 25.0, 5.0])
-        assert _poisson_deviance(x, x) == pytest.approx(0.0, abs=1e-2)
-        assert _poisson_deviance(x, x * 1.3) > 0
-        assert _poisson_deviance(x, np.array([10.0, 3.0, 25.0, 5.0])) > 0
-
-    def test_saturated_dispersion_is_small_on_exact_and_about_one_on_poisson(self, selection_panel):
-        clean = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]), 50000)
-        assert saturated_dispersion(clean, selection_panel) < 0.5
-        rng = np.random.default_rng(1)
-        P = rng.dirichlet(np.ones(48) * 0.5, size=6).T
-        mu = 50000 * (P @ np.array([0.5, 0.0, 0.3, 0.0, 0.2, 0.0]))
-        phis = [saturated_dispersion(rng.poisson(mu).astype(float), P) for _ in range(20)]
-        assert 0.5 < np.median(phis) < 2.0
-
-    def test_saturated_dispersion_grows_with_multiplicative_noise(self):
-        rng = np.random.default_rng(2)
-        P = rng.dirichlet(np.ones(48) * 0.5, size=6).T
-        mu = 200000 * (P @ np.array([0.5, 0.0, 0.3, 0.0, 0.2, 0.0]))
-        noisy = np.round(mu * rng.gamma(25.0, 0.04, size=len(mu)))  # CV 0.2
-        assert saturated_dispersion(noisy, P) > 3.0
-
-
-class TestForwardBackward:
-    def test_adds_the_generating_signatures_and_stops(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        got = _forward_backward(counts, selection_panel, [0, 2], 10.0, set(), decomposeQP, 50)
-        assert got == [0, 2, 4]
-
-    def test_removes_a_start_column_that_is_not_needed(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        got = _forward_backward(counts, selection_panel, [0, 1, 2], 10.0, set(), decomposeQP, 50)
-        assert got == [0, 2, 4]
-
-    def test_never_removes_a_protected_column(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        got = _forward_backward(counts, selection_panel, [0, 1, 2], 10.0, {1}, decomposeQP, 50)
-        assert 1 in got and {0, 2, 4} <= set(got)
-
-    def test_a_huge_margin_adds_nothing(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        assert _forward_backward(counts, selection_panel, [0, 2], 1e9, set(), decomposeQP, 50) == [0, 2]
-
-    def test_max_iterations_caps_the_moves(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        assert _forward_backward(counts, selection_panel, [0, 1], 10.0, set(), decomposeQP, 1) != [0, 2, 4]
-
-
 class TestHybridStepwiseSelection:
+    def _counts(self, P, weights, total=5000):
+        probs = P @ weights
+        return np.round(probs * total)
+
     def test_selects_true_signatures(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        idx, expo, err = hybrid_stepwise_selection(counts, selection_panel)
-        assert sorted(idx.tolist()) == [0, 2, 4]
-        assert expo == pytest.approx([0.5, 0.3, 0.2], abs=0.02)
-        assert expo.sum() == pytest.approx(1.0)
-        assert err.shape == (1,)
+        # Profile is a clean mix of signatures 0 and 2.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, exposures, errors = hybrid_stepwise_selection(m, selection_panel, R=50)
+        assert 0 in sel_idx
+        assert 2 in sel_idx
 
-    def test_recovers_the_mixture(self, simple_P, counts_profile, known_weights):
-        idx, expo, _ = hybrid_stepwise_selection(counts_profile, simple_P)
-        assert sorted(idx.tolist()) == [0, 1, 2]
-        assert expo == pytest.approx(known_weights, abs=0.02)
+    def test_return_shapes_consistent(self, selection_panel):
+        weights = np.array([0.5, 0.0, 0.5, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, exposures, errors = hybrid_stepwise_selection(m, selection_panel, R=40)
+        assert exposures.shape[0] == len(sel_idx)
+        assert exposures.sum() == pytest.approx(1.0)
+        assert errors.shape == (1,)
 
-    def test_drops_a_spurious_column(self, simple_P):
-        counts = _counts(simple_P, np.array([0.6, 0.0, 0.4]))
-        idx, _, _ = hybrid_stepwise_selection(counts, simple_P)
-        assert sorted(idx.tolist()) == [0, 2]
+    def test_mandatory_indices_always_present(self, selection_panel):
+        # Signature 4 contributes nothing, but is marked mandatory -> must stay.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, _, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, mandatory_indices=[4]
+        )
+        assert 4 in sel_idx
 
-    def test_is_deterministic(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        np.random.seed(1)
-        a = hybrid_stepwise_selection(counts, selection_panel)
-        np.random.seed(2)
-        b = hybrid_stepwise_selection(counts, selection_panel)
-        assert a[0].tolist() == b[0].tolist()
-        assert a[1] == pytest.approx(b[1])
+    def test_pre_filter_keeps_mandatory(self, selection_panel):
+        # Aggressive pre-filter would drop the absent signature 4, but mandatory
+        # protection must keep it in the final result.
+        weights = np.array([0.7, 0.0, 0.3, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, _, _ = hybrid_stepwise_selection(
+            m,
+            selection_panel,
+            R=40,
+            pre_filter_threshold=0.05,
+            mandatory_indices=[4],
+        )
+        assert 4 in sel_idx
 
-    def test_fractional_profile_uses_the_mutation_count(self, simple_P):
-        probs = simple_P @ np.array([0.6, 0.0, 0.4])
-        idx, _, _ = hybrid_stepwise_selection(probs, simple_P, mutation_count=20000)
-        assert sorted(idx.tolist()) == [0, 2]
+    def test_indices_map_to_original_columns(self, selection_panel):
+        # With pre-filter on, returned indices must reference the ORIGINAL P
+        # columns (0..N-1), not positions in the filtered matrix.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        sel_idx, _, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, pre_filter_threshold=0.01
+        )
+        assert np.all(sel_idx >= 0)
+        assert np.all(sel_idx < selection_panel.shape[1])
+        # No duplicates and sorted ascending (as constructed in the function).
+        assert len(set(sel_idx.tolist())) == len(sel_idx)
 
-    def test_fractional_profile_without_count_raises(self, simple_P):
-        with pytest.raises(ValueError, match="mutation_count"):
-            hybrid_stepwise_selection(simple_P @ np.array([0.6, 0.0, 0.4]), simple_P)
+    def test_same_rng_seed_gives_the_same_fit(self, selection_panel):
+        weights = np.array([0.5, 0.0, 0.3, 0.2, 0.0])
+        m = self._counts(selection_panel, weights)
+        first = hybrid_stepwise_selection(m, selection_panel, R=40, rng=3)
+        again = hybrid_stepwise_selection(m, selection_panel, R=40, rng=3)
+        for a, b in zip(first, again):
+            assert np.array_equal(a, b)
 
-    def test_anchor_indices_always_present(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        idx, _, _ = hybrid_stepwise_selection(counts, selection_panel, anchor_indices=[1], anchor_floor=None)
-        assert 1 in idx.tolist()
-        assert {0, 2, 4} <= set(idx.tolist())
+    def test_rng_leaves_the_global_seed_alone(self, selection_panel):
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(4)
+        expected = np.random.random()
+        np.random.seed(4)
+        hybrid_stepwise_selection(m, selection_panel, R=40, rng=0)
+        assert np.random.random() == expected
 
-    def test_anchor_floor_drops_unused_anchor(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        idx, expo, _ = hybrid_stepwise_selection(counts, selection_panel, anchor_indices=[1], anchor_floor=0.002)
-        assert 1 not in idx.tolist()
-        assert sorted(idx.tolist()) == [0, 2, 4]
-        assert expo.sum() == pytest.approx(1.0)
+    def test_per_sample_children_make_the_run_order_independent(self, selection_panel):
+        """The reason to pass `rng`: with one spawned child per sample the result
+        does not depend on which worker, or in what order, a sample is fitted."""
+        mixes = [
+            np.array([0.6, 0.0, 0.4, 0.0, 0.0]),
+            np.array([0.0, 0.5, 0.0, 0.5, 0.0]),
+            np.array([0.4, 0.0, 0.2, 0.0, 0.4]),
+        ]
+        profiles = [self._counts(selection_panel, w) for w in mixes]
+        children = np.random.SeedSequence(0).spawn(len(profiles))
 
-    def test_anchor_floor_keeps_used_anchor(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.1, 0.3, 0.0, 0.1]))
-        idx, _, _ = hybrid_stepwise_selection(counts, selection_panel, anchor_indices=[1], anchor_floor=0.002)
-        assert 1 in idx.tolist()
+        def fit(i):
+            return hybrid_stepwise_selection(
+                profiles[i], selection_panel, R=40, rng=children[i]
+            )
 
-    def test_anchor_floor_keeps_at_least_two(self, simple_P):
-        counts = _counts(simple_P, np.array([0.0, 0.0, 1.0]))
-        idx, _, _ = hybrid_stepwise_selection(counts, simple_P, anchor_indices=[0, 1], anchor_floor=0.5)
-        assert len(idx) >= 2
-
-    def test_one_anchor_starts_from_the_strongest_column_too(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        idx, _, _ = hybrid_stepwise_selection(counts, selection_panel, anchor_indices=[3], anchor_floor=None)
-        assert {0, 2, 3, 4} == set(idx.tolist())
-
-    def test_dispersion_scaling_raises_the_margin_on_noisy_data(self):
-        rng = np.random.default_rng(3)
-        P = rng.dirichlet(np.ones(48) * 0.5, size=6).T
-        mu = 200000 * (P @ np.array([0.5, 0.0, 0.3, 0.0, 0.2, 0.0]))
-        noisy = np.round(mu * rng.gamma(25.0, 0.04, size=len(mu)))  # CV 0.2
-        scaled = hybrid_stepwise_selection(noisy, P)
-        unscaled = hybrid_stepwise_selection(noisy, P, dispersion_scaled=False)
-        assert len(scaled[0]) <= len(unscaled[0])
-        assert {0, 2, 4} <= set(scaled[0].tolist())
-
-    def test_margin_must_be_positive(self, counts_profile, simple_P):
-        for bad in (None, 0.0, -1.0):
-            with pytest.raises(ValueError, match="min_deviance_gain"):
-                hybrid_stepwise_selection(counts_profile, simple_P, min_deviance_gain=bad)
-
-    def test_defaults(self):
-        import inspect
-
-        sig = inspect.signature(hybrid_stepwise_selection)
-        assert sig.parameters["min_deviance_gain"].default == 10.0
-        assert sig.parameters["dispersion_scaled"].default is True
-        assert sig.parameters["anchor_floor"].default == 0.002
-        assert "R" not in sig.parameters and "min_support" not in sig.parameters
-
-    def test_indices_refer_to_the_full_panel(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.0, 0.0, 0.6, 0.0, 0.4]))
-        idx, expo, _ = hybrid_stepwise_selection(counts, selection_panel)
-        assert sorted(idx.tolist()) == [2, 4]
-        assert expo == pytest.approx([0.6, 0.4], abs=0.02)
-
-
-class TestExposureIntervals:
-    def test_brackets_the_estimate_and_narrows_with_depth(self, selection_panel):
-        for total, width_cap in ((2000, 0.2), (200000, 0.05)):
-            counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]), total)
-            idx, expo, _ = hybrid_stepwise_selection(counts, selection_panel)
-            ci = exposure_intervals(counts, selection_panel, idx, B=60, rng=0)
-            assert np.all(ci["lower"] <= expo + 1e-9) and np.all(expo - 1e-9 <= ci["upper"])
-            assert np.all(ci["upper"] - ci["lower"] < width_cap)
-            assert ci["replicates"].shape == (len(idx), 60)
-
-    def test_auto_sigma_is_zero_on_exact_data_and_positive_on_noisy(self):
-        rng = np.random.default_rng(4)
-        P = rng.dirichlet(np.ones(48) * 0.5, size=6).T
-        mu = 200000 * (P @ np.array([0.5, 0.0, 0.3, 0.0, 0.2, 0.0]))
-        idx = np.array([0, 2, 4])
-        assert exposure_intervals(np.round(mu), P, idx, B=10, rng=0)["sigma_b"] == 0.0
-        noisy = np.round(mu * rng.gamma(25.0, 0.04, size=len(mu)))
-        assert exposure_intervals(noisy, P, idx, B=10, rng=0)["sigma_b"] > 0.05
-
-    def test_fixed_sigma_widens_the_interval(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]), 50000)
-        idx = np.array([0, 2, 4])
-        narrow = exposure_intervals(counts, selection_panel, idx, B=60, overdispersion=None, rng=0)
-        wide = exposure_intervals(counts, selection_panel, idx, B=60, overdispersion=0.2, rng=0)
-        assert np.all(wide["upper"] - wide["lower"] > narrow["upper"] - narrow["lower"])
-
-    def test_same_rng_same_interval_and_invalid_sigma_raises(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        idx = np.array([0, 2, 4])
-        a = exposure_intervals(counts, selection_panel, idx, B=20, rng=5)
-        b = exposure_intervals(counts, selection_panel, idx, B=20, rng=5)
-        assert np.array_equal(a["replicates"], b["replicates"])
-        for bad in (-0.1, "lots"):
-            with pytest.raises(ValueError, match="overdispersion"):
-                exposure_intervals(counts, selection_panel, idx, B=5, overdispersion=bad)
-
-    def test_single_signature_has_a_degenerate_interval(self, selection_panel):
-        counts = _counts(selection_panel, np.array([1.0, 0.0, 0.0, 0.0, 0.0]))
-        ci = exposure_intervals(counts, selection_panel, np.array([0]), B=5, rng=0)
-        assert ci["lower"] == pytest.approx([1.0]) and ci["upper"] == pytest.approx([1.0])
+        forward = [fit(i) for i in range(3)]
+        backward = [fit(i) for i in reversed(range(3))][::-1]
+        for a, b in zip(forward, backward):
+            for x, y in zip(a, b):
+                assert np.array_equal(x, y)
 
 
-class TestSelectionStability:
-    def test_true_signatures_are_stable_and_absent_ones_never_picked(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        freq = selection_stability(counts, selection_panel, B=20, rng=0)
-        assert freq.shape == (5,)
-        assert np.all(freq[[0, 2, 4]] > 0.9)
-        assert np.all(freq[[1, 3]] < 0.2)
+class TestFitGainPruning:
+    """`min_fit_improvement` must evict signatures the reconstruction ignores.
 
-    def test_anchors_are_always_selected(self, selection_panel):
-        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
-        freq = selection_stability(counts, selection_panel, B=10, rng=0, anchor_indices=[1], anchor_floor=None)
-        assert freq[1] == 1.0
+    The bootstrap criterion keeps any exposure that is stably above `threshold`,
+    which on deep profiles admits signatures that contribute nothing to the fit.
+    """
+
+    def _counts(self, P, weights, total=20000):
+        probs = P @ weights
+        return np.round(probs * total)
+
+    def _contaminated_counts(self, P, eps=0.06, total=40000):
+        """A 2-signature mix plus a component no column of P can represent.
+
+        This is the situation that makes the bootstrap over-select on real data:
+        the residual has to go somewhere, the flattest available signature
+        absorbs it at a stable few percent, and with enough mutations that
+        exposure clears `threshold` in every replicate.
+        """
+        contamination = np.array([0.10, 0.15, 0.15, 0.20, 0.20, 0.20])
+        contamination /= contamination.sum()
+        profile = (1 - eps) * (P @ np.array([0.6, 0.0, 0.4, 0.0, 0.0]))
+        profile += eps * contamination
+        return np.round(profile / profile.sum() * total)
+
+    def test_drops_signature_that_only_absorbs_residual(self, selection_panel):
+        m = self._contaminated_counts(selection_panel)
+        np.random.seed(0)
+        loose, _, _ = hybrid_stepwise_selection(m, selection_panel, R=40)
+        np.random.seed(0)
+        pruned, exposures, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, min_fit_improvement=0.002
+        )
+        # The bootstrap keeps the residual sponge; the fit-gain gate evicts it.
+        assert 4 in loose
+        assert set(pruned.tolist()) == {0, 2}
+        assert exposures.shape[0] == len(pruned)
+        assert exposures.sum() == pytest.approx(1.0)
+
+    def test_keeps_signatures_the_fit_needs(self, selection_panel):
+        # Every one of the three contributes a distinct, large component.
+        weights = np.array([0.4, 0.35, 0.25, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        pruned, _, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, min_fit_improvement=0.002
+        )
+        assert {0, 1, 2} <= set(pruned.tolist())
+
+    def test_mandatory_survives_pruning(self, selection_panel):
+        # Signature 4 contributes nothing to the fit but is protected.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        pruned, _, _ = hybrid_stepwise_selection(
+            m,
+            selection_panel,
+            R=40,
+            mandatory_indices=[4],
+            min_fit_improvement=0.5,  # aggressive enough to strip everything else
+        )
+        assert 4 in pruned
+
+    def test_never_falls_below_two_signatures(self, selection_panel):
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        pruned, exposures, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, min_fit_improvement=1.0
+        )
+        assert len(pruned) == 2
+        assert exposures.sum() == pytest.approx(1.0)
+
+    def test_disabled_by_default(self, selection_panel):
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        baseline, _, _ = hybrid_stepwise_selection(m, selection_panel, R=40)
+        np.random.seed(0)
+        explicit_off, _, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=40, min_fit_improvement=None
+        )
+        assert baseline.tolist() == explicit_off.tolist()
+
+    def test_indices_stay_global_with_pre_filter(self, selection_panel):
+        # Pruning happens in the filtered index space; the result must still be
+        # expressed in original P columns.
+        weights = np.array([0.6, 0.0, 0.4, 0.0, 0.0])
+        m = self._counts(selection_panel, weights)
+        np.random.seed(0)
+        pruned, _, _ = hybrid_stepwise_selection(
+            m,
+            selection_panel,
+            R=40,
+            pre_filter_threshold=0.001,
+            min_fit_improvement=0.002,
+        )
+        assert np.all((pruned >= 0) & (pruned < selection_panel.shape[1]))
+        assert {0, 2} <= set(pruned.tolist())
+
+
+class TestCycleGuard:
+    """The greedy add/remove walk must terminate even when moves undo each other.
+
+    A pair of signatures whose apparent significance depends on the presence of
+    the other makes the search oscillate:  {0,1,2,3} -> {0,1,3} -> {0,1} ->
+    {0,1,2} -> {0,1,2,3} -> ...  Before the visited-set guard this looped
+    forever, which is exactly what happened on real profiles carrying only a
+    handful of mutations (panel-sized breast catalogues).
+    """
+
+    @staticmethod
+    def _oscillating_decomposer(counter):
+        """QP stand-in whose exposures depend on which signatures are present.
+
+        Signature identity is read off the columns of the submatrix handed to
+        the decomposer (each column has a unique maximum row).
+        """
+
+        def decompose(m_col, P_sub):
+            counter["calls"] += 1
+            present = [int(np.argmax(P_sub[:, j])) for j in range(P_sub.shape[1])]
+            exposures = np.zeros(P_sub.shape[1])
+            for j, sig in enumerate(present):
+                if sig in (0, 1):  # always clearly significant
+                    exposures[j] = 0.4
+                elif sig == 2:  # significant only while 3 is absent
+                    exposures[j] = 0.0 if 3 in present else 0.2
+                elif sig == 3:  # significant only while 2 is present
+                    exposures[j] = 0.2 if 2 in present else 0.0
+            total = exposures.sum()
+            return exposures / total if total > 0 else exposures
+
+        return decompose
+
+    @pytest.fixture
+    def identity_panel(self):
+        P = np.eye(4) * 0.7 + 0.1
+        return P / P.sum(axis=0)
+
+    def test_terminates_on_oscillating_moves(self, identity_panel):
+        counter = {"calls": 0}
+        m = np.array([25.0, 25.0, 25.0, 25.0])
+        np.random.seed(0)
+        sel_idx, exposures, _ = hybrid_stepwise_selection(
+            m,
+            identity_panel,
+            R=5,
+            decomposition_method=self._oscillating_decomposer(counter),
+            pre_filter_threshold=None,  # the walk must start from the full panel
+            max_iterations=50,
+        )
+        # Terminated by cycle detection, not by exhausting max_iterations:
+        # a cycling search would keep evaluating moves for all 50 iterations.
+        assert counter["calls"] < 200
+        assert set(sel_idx.tolist()) == {0, 1, 2}
+        assert exposures.sum() == pytest.approx(1.0)
+
+    def test_max_iterations_caps_the_search(self, identity_panel):
+        counter = {"calls": 0}
+        m = np.array([25.0, 25.0, 25.0, 25.0])
+        np.random.seed(0)
+        sel_idx, _, _ = hybrid_stepwise_selection(
+            m,
+            identity_panel,
+            R=5,
+            decomposition_method=self._oscillating_decomposer(counter),
+            pre_filter_threshold=None,  # the walk must start from the full panel
+            max_iterations=1,
+        )
+        # One move only: signature 2 dropped from the initial full set.
+        assert set(sel_idx.tolist()) == {0, 1, 3}
+
+    def test_low_count_profile_terminates(self, selection_panel):
+        """A 3-mutation profile against the whole panel must still return."""
+        m = np.array([1.0, 0.0, 1.0, 0.0, 1.0, 0.0])
+        np.random.seed(7)
+        sel_idx, exposures, _ = hybrid_stepwise_selection(
+            m, selection_panel, R=20, pre_filter_threshold=0.001
+        )
+        assert len(sel_idx) >= 2
+        assert exposures.sum() == pytest.approx(1.0)
