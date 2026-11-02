@@ -27,6 +27,11 @@ def _optional_float(text):
     return None if text.lower() == "none" else float(text)
 
 
+def _margin(text):
+    """A deviance margin, or 'bonferroni' for the panel-size rule."""
+    return "bonferroni" if text.lower() == "bonferroni" else float(text)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="sigconfide")
     p.add_argument("--samples", required=True, help="contexts x samples TSV")
@@ -42,9 +47,10 @@ def main(argv=None):
     )
     p.add_argument(
         "--min-deviance-gain",
-        type=float,
+        type=_margin,
         default=_DEFAULTS["min_deviance_gain"],
-        help="deviance margin a signature must clear (default %(default)s)",
+        help="deviance margin a signature must clear (default %(default)s; "
+        "'bonferroni' derives it from the number of signatures in the panel)",
     )
     p.add_argument(
         "--dispersion-scaled",
@@ -61,6 +67,14 @@ def main(argv=None):
         default=_DEFAULTS["anchor_floor"],
         help="drop an anchor whose final exposure is below this fraction of the "
         "profile (default %(default)s; 'none' keeps every anchor)",
+    )
+    p.add_argument(
+        "--anchor-min-cost",
+        type=_optional_float,
+        default=_DEFAULTS["anchor_min_cost"],
+        help="also drop an anchor whose removal raises the deviance by less than "
+        "this margin, scaled like --min-deviance-gain (default %(default)s = off; "
+        "0 drops the anchors that only absorbed noise)",
     )
     p.add_argument(
         "--intervals",
@@ -109,6 +123,7 @@ def main(argv=None):
         min_deviance_gain=a.min_deviance_gain,
         dispersion_scaled=a.dispersion_scaled,
         anchor_floor=a.anchor_floor,
+        anchor_min_cost=a.anchor_min_cost,
     )
 
 

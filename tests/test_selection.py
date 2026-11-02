@@ -5,6 +5,7 @@ from sigconfide.estimates.selection import (
     _bootstrap_matrix,
     _forward_backward,
     _poisson_deviance,
+    bonferroni_margin,
     exposure_intervals,
     hybrid_stepwise_selection,
     saturated_dispersion,
@@ -326,7 +327,79 @@ class TestHybridStepwiseSelection:
         assert sig.parameters["min_deviance_gain"].default == 10.0
         assert sig.parameters["dispersion_scaled"].default is True
         assert sig.parameters["anchor_floor"].default == 0.002
+        assert sig.parameters["anchor_min_cost"].default is None
         assert "R" not in sig.parameters and "min_support" not in sig.parameters
+
+    def test_anchor_min_cost_drops_an_anchor_the_fit_does_not_rely_on(
+        self, selection_panel
+    ):
+        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
+        # no floor: the unused anchor survives on exposure alone ...
+        idx, _, _ = hybrid_stepwise_selection(
+            counts, selection_panel, anchor_indices=[1], anchor_floor=None
+        )
+        assert 1 in idx.tolist()
+        # ... and goes once removing it must raise the deviance
+        idx, expo, _ = hybrid_stepwise_selection(
+            counts,
+            selection_panel,
+            anchor_indices=[1],
+            anchor_floor=None,
+            anchor_min_cost=1.0,
+        )
+        assert sorted(idx.tolist()) == [0, 2, 4]
+        assert expo.sum() == pytest.approx(1.0)
+
+    def test_anchor_min_cost_keeps_an_anchor_the_fit_relies_on(self, selection_panel):
+        counts = _counts(selection_panel, np.array([0.5, 0.1, 0.3, 0.0, 0.1]))
+        idx, _, _ = hybrid_stepwise_selection(
+            counts, selection_panel, anchor_indices=[1], anchor_min_cost=10.0
+        )
+        assert 1 in idx.tolist()
+
+    def test_anchor_min_cost_zero_drops_only_noise_absorbers(self):
+        rng = np.random.default_rng(5)
+        P = rng.dirichlet(np.ones(96) * 0.3, size=6).T
+        mu = 50000 * (P @ np.array([0.45, 0.0, 0.35, 0.0, 0.2, 0.0]))
+        noisy = np.floor(mu * (1 + 0.1 * rng.standard_normal(len(mu))))
+        with_floor = hybrid_stepwise_selection(noisy, P, anchor_indices=[1, 5])
+        with_cost = hybrid_stepwise_selection(
+            noisy, P, anchor_indices=[1, 5], anchor_min_cost=0.0
+        )
+        assert set(with_cost[0].tolist()) <= set(with_floor[0].tolist())
+        assert {0, 2, 4} <= set(with_cost[0].tolist())
+
+    def test_anchor_min_cost_keeps_at_least_two(self, simple_P):
+        counts = _counts(simple_P, np.array([0.0, 0.0, 1.0]))
+        idx, _, _ = hybrid_stepwise_selection(
+            counts, simple_P, anchor_indices=[0, 1], anchor_floor=None,
+            anchor_min_cost=1e6,
+        )
+        assert len(idx) >= 2
+
+    def test_negative_anchor_min_cost_raises(self, counts_profile, simple_P):
+        with pytest.raises(ValueError, match="anchor_min_cost"):
+            hybrid_stepwise_selection(
+                counts_profile, simple_P, anchor_indices=[0], anchor_min_cost=-1.0
+            )
+
+    def test_bonferroni_margin_grows_with_the_panel(self):
+        assert bonferroni_margin(12) == pytest.approx(6.96, abs=0.01)
+        assert bonferroni_margin(101) == pytest.approx(10.85, abs=0.01)
+        assert bonferroni_margin(1) < bonferroni_margin(10) < bonferroni_margin(100)
+        with pytest.raises(ValueError, match="n_candidates"):
+            bonferroni_margin(0)
+
+    def test_bonferroni_margin_selects_the_true_set(self, selection_panel):
+        counts = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]))
+        idx, _, _ = hybrid_stepwise_selection(
+            counts, selection_panel, min_deviance_gain="bonferroni"
+        )
+        assert sorted(idx.tolist()) == [0, 2, 4]
+
+    def test_unknown_margin_rule_raises(self, counts_profile, simple_P):
+        with pytest.raises(ValueError, match="bonferroni"):
+            hybrid_stepwise_selection(counts_profile, simple_P, min_deviance_gain="bic")
 
     def test_indices_refer_to_the_full_panel(self, selection_panel):
         counts = _counts(selection_panel, np.array([0.0, 0.0, 0.6, 0.0, 0.4]))

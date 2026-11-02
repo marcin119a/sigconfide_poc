@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from sigconfide.decompose.qp import decomposeQP
 from sigconfide.estimates.selection import exposure_intervals, hybrid_stepwise_selection
 
 OUTPUT_NAME = "Assignment_Solution_Activities.txt"
@@ -39,9 +40,7 @@ def _fit_sample(args):
             B=R,
             overdispersion=overdispersion,
             level=level,
-            decomposition_method=kwargs.get(
-                "decomposition_method", hybrid_stepwise_selection.__defaults__[5]
-            ),
+            decomposition_method=kwargs.get("decomposition_method", decomposeQP),
         )
         rows = [
             (

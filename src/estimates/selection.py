@@ -3,9 +3,9 @@
 The active set is found by a forward-backward search on the Poisson deviance of
 the fit: starting from the anchor signatures, a signature is added when it
 lowers the deviance by at least a margin and removed when it accounts for less
-than that margin, the margin being ``min_deviance_gain`` scaled by the
-quasi-Poisson dispersion of the saturated fit.  The search is deterministic.
-
+than that margin, the margin being ``min_deviance_gain`` (a number, or the
+Bonferroni margin for the size of the panel) scaled by the quasi-Poisson
+dispersion of the saturated fit.  The search is deterministic.
 The bootstrap enters only afterwards: ``exposure_intervals`` reports percentile
 intervals of the selected exposures and ``selection_stability`` the fraction of
 replicates in which each signature is selected again, both from an
@@ -14,6 +14,7 @@ selected set.
 """
 
 import numpy as np
+from scipy.stats import chi2
 from sigconfide.decompose.qp import decomposeQP
 from sigconfide.estimates.standard import findSigExposures
 from sigconfide.utils.utils import is_wholenumber, resolve_rng
@@ -184,6 +185,16 @@ def estimate_overdispersion(
     return float(np.sqrt(max(0.0, sigma2)))
 
 
+def bonferroni_margin(n_candidates, alpha=0.05) -> float:
+    """The deviance margin that bounds the family-wise false-positive rate of
+    the search at ``alpha`` under Poisson noise, for a panel of
+    ``n_candidates`` signatures.
+    """
+    if n_candidates < 1:
+        raise ValueError("'n_candidates' must be at least 1.")
+    return float(chi2.isf(min(1.0, 2.0 * alpha / n_candidates), 1))
+
+
 # ---------------------------------------------------------------- search -----
 def _forward_backward(
     counts, P, start, margin, protected, decomposition_method, max_iterations
@@ -236,33 +247,45 @@ def _forward_backward(
     return cols
 
 
-def _apply_anchor_floor(
-    m, P, cols, exposures, errors, protected, floor, decomposition_method
+def _anchor_check(
+    m, counts, P, cols, protected, floor, min_cost, decomposition_method
 ):
-    """Drop anchor signatures whose final relative exposure is below `floor`.
+    """Drop anchor signatures the final fit does not use.
 
     An anchor signature is carried through the search unconditionally so
     that a trace of it is fitted at all and a look-alike cannot stand in for
-    it; this last step asks whether the fit actually used it.  One column at
-    a time, the smallest exposure first, refitting after each removal because
-    the remaining exposures shift; at least two signatures always survive.
+    it; this last step asks whether the fit actually used it.  An anchor
+    fails when its relative exposure is below ``floor`` or, with ``min_cost``
+    given, when removing it from the final set raises the Poisson deviance by
+    less than ``min_cost`` (a negative cost means the fit without it is the
+    better one: the anchor only absorbed noise).  
     """
-    cols = np.asarray(cols)
-    while len(cols) > 2:
-        below = [
-            (exposures[i], i)
-            for i, c in enumerate(cols)
-            if c in protected and exposures[i] < floor
-        ]
-        if not below:
-            break
-        _, i_drop = min(below)
-        cols = np.delete(cols, i_drop)
+    cols = list(cols)
+    while True:
         exposures, errors = findSigExposures(
             m.reshape(-1, 1), P[:, cols], decomposition_method=decomposition_method
         )
         exposures = exposures.flatten()
-    return cols, exposures, errors
+        if len(cols) <= 2:
+            break
+        base = None
+        failing = []
+        for i, c in enumerate(cols):
+            if c not in protected:
+                continue
+            bad = floor is not None and exposures[i] < floor
+            if not bad and min_cost is not None:
+                if base is None:
+                    base = _deviance_of(counts, P, cols, decomposition_method)
+                kept = [x for x in cols if x != c]
+                cost = _deviance_of(counts, P, kept, decomposition_method) - base
+                bad = cost < min_cost
+            if bad:
+                failing.append((exposures[i], i))
+        if not failing:
+            break
+        cols.pop(min(failing)[1])
+    return np.array(cols), exposures, errors
 
 
 def hybrid_stepwise_selection(
@@ -273,6 +296,7 @@ def hybrid_stepwise_selection(
     min_deviance_gain=10.0,
     dispersion_scaled=True,
     anchor_floor=0.002,
+    anchor_min_cost=None,
     decomposition_method=decomposeQP,
     max_iterations=200,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -300,13 +324,13 @@ def hybrid_stepwise_selection(
             in the model: the search starts from them and never removes them.
             They face one check at the end, see ``anchor_floor``. Useful for
             ubiquitous signatures such as SBS1 and SBS5.
-        min_deviance_gain (float): The deviance margin ``gamma_0`` a signature
-            must clear, before the dispersion scaling. Default 10: under
-            Poisson noise the gain of an absent signature is at most a
+        min_deviance_gain (float | str): The deviance margin ``gamma_0`` a
+            signature must clear, before the dispersion scaling. Default 10:
+            under Poisson noise the gain of an absent signature is at most a
             ``chi2_1`` draw, which exceeds 10 with probability 0.0016, about
             the 95th percentile of the largest gain among a hundred absent
             candidates, and about ``log n`` (the BIC penalty) for a few
-            thousand mutations.
+            thousand mutations. 
         dispersion_scaled (bool): Multiply the margin by ``max(1, phi)``, the
             quasi-Poisson dispersion of the saturated fit, so that the margin
             keeps its meaning on over-dispersed catalogues; Poisson-or-quieter
@@ -319,6 +343,11 @@ def hybrid_stepwise_selection(
             the floor go one at a time, the smallest first, with a refit after
             each; at least two signatures survive. Default 0.002; None keeps
             every anchor.
+        anchor_min_cost (float | None): Second condition of that check, off
+            by default: an anchor is also dropped when removing it from the
+            final set raises the Poisson deviance by less than this margin
+            (scaled by ``max(1, phi)`` like the search margin when
+            ``dispersion_scaled``). 
         decomposition_method (callable): Solver ``f(m, P) -> exposures``.
             Default ``decomposeQP``.
         max_iterations (int): Cap on the number of moves. Default 200.
@@ -330,12 +359,21 @@ def hybrid_stepwise_selection(
         (Frobenius norm).
     """
     m = np.asarray(m, dtype=float)
+    if isinstance(min_deviance_gain, str):
+        if min_deviance_gain != "bonferroni":
+            raise ValueError(
+                "'min_deviance_gain' must be a positive deviance margin or 'bonferroni'."
+            )
+        min_deviance_gain = bonferroni_margin(P.shape[1])
     if min_deviance_gain is None or min_deviance_gain <= 0:
         raise ValueError("'min_deviance_gain' must be a positive deviance margin.")
+    if anchor_min_cost is not None and anchor_min_cost < 0:
+        raise ValueError("'anchor_min_cost' must be a non-negative deviance margin.")
     anchors = sorted(set(int(i) for i in (anchor_indices or [])))
     counts = _as_counts(m, mutation_count)
     saturated, _, phi = _saturated_fit(counts, P, anchors, decomposition_method)
-    margin = min_deviance_gain * (max(1.0, phi) if dispersion_scaled else 1.0)
+    scale = max(1.0, phi) if dispersion_scaled else 1.0
+    margin = min_deviance_gain * scale
 
     start = list(anchors)
     for j in np.argsort(saturated)[::-1]:
@@ -352,15 +390,15 @@ def hybrid_stepwise_selection(
         m.reshape(-1, 1), P[:, indices], decomposition_method=decomposition_method
     )
     exposures = exposures.flatten()
-    if anchor_floor is not None and anchors:
-        indices, exposures, errors = _apply_anchor_floor(
+    if anchors and (anchor_floor is not None or anchor_min_cost is not None):
+        indices, exposures, errors = _anchor_check(
             m,
+            counts,
             P,
             indices,
-            exposures,
-            errors,
             set(anchors),
             anchor_floor,
+            None if anchor_min_cost is None else anchor_min_cost * scale,
             decomposition_method,
         )
     return indices, exposures, errors

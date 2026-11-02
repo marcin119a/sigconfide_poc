@@ -90,8 +90,16 @@ Parameters:
   whether the final fit actually used it. Columns below the floor go one at a time,
   smallest first, with a refit after each; at least two signatures survive. `None` keeps
   every anchor,
+- `anchor_min_cost` (default `None`, off) — second condition of that check: an anchor is
+  also dropped when removing it from the final set raises the Poisson deviance by less
+  than this margin (scaled by `max(1, phi)` like the search margin). `0` drops the
+  anchors whose removal does not raise the deviance at all (they only absorbed noise)
+  and keeps every anchor the fit relies on, however small,
 - `min_deviance_gain` (default `10`) — the deviance margin `gamma_0` a signature must
-  clear, before the dispersion scaling,
+  clear, before the dispersion scaling; `"bonferroni"` derives it from the size of the
+  panel (`bonferroni_margin(P.shape[1])`: the 95th percentile of the largest gain among
+  the panel's absent candidates under Poisson noise, 7.0 for 12 signatures, 8.0 for 21,
+  10.8 for 101),
 - `dispersion_scaled` (default `True`) — multiply the margin by `max(1, phi)`, the
   dispersion of the saturated fit; `False` applies `min_deviance_gain` as given,
 - `decomposition_method` (default `decomposeQP`) — solver `f(m, P) -> exposures`,
