@@ -57,7 +57,7 @@ def main(argv=None):
         action=argparse.BooleanOptionalAction,
         default=_DEFAULTS["dispersion_scaled"],
         help=(
-            "scale the margin by the dispersion of the saturated fit "
+            "scale the margin by the dispersion of the support model "
             "(default %(default)s)"
         ),
     )

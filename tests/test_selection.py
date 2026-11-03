@@ -8,7 +8,7 @@ from sigconfide.estimates.selection import (
     bonferroni_margin,
     exposure_intervals,
     hybrid_stepwise_selection,
-    saturated_dispersion,
+    support_dispersion,
     selection_stability,
 )
 
@@ -172,25 +172,25 @@ class TestDeviance:
         assert _poisson_deviance(x, x * 1.3) > 0
         assert _poisson_deviance(x, np.array([10.0, 3.0, 25.0, 5.0])) > 0
 
-    def test_saturated_dispersion_is_small_on_exact_and_about_one_on_poisson(
+    def test_support_dispersion_is_small_on_exact_and_about_one_on_poisson(
         self, selection_panel
     ):
         clean = _counts(selection_panel, np.array([0.5, 0.0, 0.3, 0.0, 0.2]), 50000)
-        assert saturated_dispersion(clean, selection_panel) < 0.5
+        assert support_dispersion(clean, selection_panel) < 0.5
         rng = np.random.default_rng(1)
         P = rng.dirichlet(np.ones(48) * 0.5, size=6).T
         mu = 50000 * (P @ np.array([0.5, 0.0, 0.3, 0.0, 0.2, 0.0]))
         phis = [
-            saturated_dispersion(rng.poisson(mu).astype(float), P) for _ in range(20)
+            support_dispersion(rng.poisson(mu).astype(float), P) for _ in range(20)
         ]
         assert 0.5 < np.median(phis) < 2.0
 
-    def test_saturated_dispersion_grows_with_multiplicative_noise(self):
+    def test_support_dispersion_grows_with_multiplicative_noise(self):
         rng = np.random.default_rng(2)
         P = rng.dirichlet(np.ones(48) * 0.5, size=6).T
         mu = 200000 * (P @ np.array([0.5, 0.0, 0.3, 0.0, 0.2, 0.0]))
         noisy = np.round(mu * rng.gamma(25.0, 0.04, size=len(mu)))  # CV 0.2
-        assert saturated_dispersion(noisy, P) > 3.0
+        assert support_dispersion(noisy, P) > 3.0
 
 
 class TestForwardBackward:

@@ -65,10 +65,10 @@ for idx, exp, lo, hi in zip(sel_idx, exposures, ci["lower"], ci["upper"]):
 - `exposures` — relative exposures of the selected signatures (sum to 1),
 - `errors` — reconstruction error (Frobenius norm).
 
-How it selects. A first QP against the whole panel gives the saturated fit; the
+How it selects. A first QP against the whole panel gives the support model; the
 columns it uses are the largest identifiable model and give the quasi-Poisson
 dispersion `phi = deviance / (K - p)` of the catalogue. The search then starts from
-the anchor signatures (or the two strongest columns of the saturated fit) and, at each
+the anchor signatures (or the two strongest columns of the support model) and, at each
 step, applies the best single move over the whole panel: a signature enters when it
 lowers the Poisson deviance of the fit by at least the margin
 `min_deviance_gain * max(1, phi)`, and leaves when it accounts for less than that
@@ -101,7 +101,7 @@ Parameters:
   the panel's absent candidates under Poisson noise, 7.0 for 12 signatures, 8.0 for 21,
   10.8 for 101),
 - `dispersion_scaled` (default `True`) — multiply the margin by `max(1, phi)`, the
-  dispersion of the saturated fit; `False` applies `min_deviance_gain` as given,
+  dispersion of the support model; `False` applies `min_deviance_gain` as given,
 - `decomposition_method` (default `decomposeQP`) — solver `f(m, P) -> exposures`,
 - `max_iterations` (default `200`) — cap on the number of moves.
 

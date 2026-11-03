@@ -5,7 +5,7 @@ the fit: starting from the anchor signatures, a signature is added when it
 lowers the deviance by at least a margin and removed when it accounts for less
 than that margin, the margin being ``min_deviance_gain`` (a number, or the
 Bonferroni margin for the size of the panel) scaled by the quasi-Poisson
-dispersion of the saturated fit.  The search is deterministic.
+dispersion of the support model.  The search is deterministic.
 The bootstrap enters only afterwards: ``exposure_intervals`` reports percentile
 intervals of the selected exposures and ``selection_stability`` the fraction of
 replicates in which each signature is selected again, both from an
@@ -87,14 +87,11 @@ def _deviance_of(counts, P, cols, decomposition_method):
     return _fit_deviance(counts, P, cols, decomposition_method)[1]
 
 
-def _saturated_fit(counts, P, anchors, decomposition_method):
-    """The saturated fit: exposures against the whole panel, its active columns
-    (positive exposure, plus the anchors; at least two) and its quasi-Poisson
-    dispersion ``phi = deviance / (K - p)`` taken on those columns.
-
-    A panel can hold more signatures than contexts, so the fit against all of
-    them is not identifiable; the columns the QP actually uses are the largest
-    identifiable model and carry the dispersion estimate.
+def _support_fit(counts, P, anchors, decomposition_method):
+    """The full-panel fit: exposures against the whole panel, the columns it
+    uses (positive exposure, plus the anchors; at least two) and the
+    quasi-Poisson dispersion ``phi = D / max(1, K - p)`` of the refit on those
+    columns, which serves as the support model.
     """
     n = counts.sum()
     exposures = decomposition_method(counts / n, P)
@@ -107,10 +104,10 @@ def _saturated_fit(counts, P, anchors, decomposition_method):
     return exposures, np.array(cols), phi
 
 
-def saturated_dispersion(
+def support_dispersion(
     m, P, mutation_count=None, anchor_indices=None, decomposition_method=decomposeQP
 ) -> float:
-    """Quasi-Poisson dispersion of the saturated fit, ``deviance / (K - p)``.
+    """Quasi-Poisson dispersion of the support model, ``deviance / (K - p)``.
 
     ``p`` counts the columns the fit against the whole panel actually uses
     (positive exposure) plus the anchors. It is 1 for Poisson counts, below 1
@@ -119,7 +116,7 @@ def saturated_dispersion(
     """
     counts = _as_counts(m, mutation_count)
     anchors = [int(i) for i in (anchor_indices or [])]
-    return float(_saturated_fit(counts, P, anchors, decomposition_method)[2])
+    return float(_support_fit(counts, P, anchors, decomposition_method)[2])
 
 
 def estimate_overdispersion(
@@ -304,13 +301,13 @@ def hybrid_stepwise_selection(
     on the Poisson deviance of the fit.
 
     The search starts from the anchor signatures (or, with fewer than two
-    anchors, from the strongest columns of the saturated fit) and considers
+    anchors, from the strongest columns of the support model) and considers
     every single move over the whole panel: a signature enters when it lowers
     the Poisson deviance of the fit by at least the margin and leaves when it
     accounts for less than the margin, the best move first, until none
     qualifies (see ``_forward_backward``).  The margin is
     ``min_deviance_gain * max(1, phi)`` with ``phi`` the quasi-Poisson
-    dispersion of the saturated fit (``saturated_dispersion``), so a
+    dispersion of the support model (``support_dispersion``), so a
     catalogue that is noisier than Poisson needs a proportionally larger gain.
     The procedure is deterministic: no resampling, no seed.
 
@@ -332,7 +329,7 @@ def hybrid_stepwise_selection(
             candidates, and about ``log n`` (the BIC penalty) for a few
             thousand mutations. 
         dispersion_scaled (bool): Multiply the margin by ``max(1, phi)``, the
-            quasi-Poisson dispersion of the saturated fit, so that the margin
+            quasi-Poisson dispersion of the support model, so that the margin
             keeps its meaning on over-dispersed catalogues; Poisson-or-quieter
             profiles are left at ``min_deviance_gain``. Default True.
         anchor_floor (float | None): Relative exposure below which an anchor
@@ -371,12 +368,12 @@ def hybrid_stepwise_selection(
         raise ValueError("'anchor_min_cost' must be a non-negative deviance margin.")
     anchors = sorted(set(int(i) for i in (anchor_indices or [])))
     counts = _as_counts(m, mutation_count)
-    saturated, _, phi = _saturated_fit(counts, P, anchors, decomposition_method)
+    support_exposures, _, phi = _support_fit(counts, P, anchors, decomposition_method)
     scale = max(1.0, phi) if dispersion_scaled else 1.0
     margin = min_deviance_gain * scale
 
     start = list(anchors)
-    for j in np.argsort(saturated)[::-1]:
+    for j in np.argsort(support_exposures)[::-1]:
         if len(start) >= 2:
             break
         if int(j) not in start:
