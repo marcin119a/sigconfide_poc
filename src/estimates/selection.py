@@ -255,7 +255,7 @@ def _anchor_check(
     fails when its relative exposure is below ``floor`` or, with ``min_cost``
     given, when removing it from the final set raises the Poisson deviance by
     less than ``min_cost`` (a negative cost means the fit without it is the
-    better one: the anchor only absorbed noise).  
+    better one: the anchor only absorbed noise).
     """
     cols = list(cols)
     while True:
@@ -327,7 +327,7 @@ def hybrid_stepwise_selection(
             ``chi2_1`` draw, which exceeds 10 with probability 0.0016, about
             the 95th percentile of the largest gain among a hundred absent
             candidates, and about ``log n`` (the BIC penalty) for a few
-            thousand mutations. 
+            thousand mutations.
         dispersion_scaled (bool): Multiply the margin by ``max(1, phi)``, the
             quasi-Poisson dispersion of the support model, so that the margin
             keeps its meaning on over-dispersed catalogues; Poisson-or-quieter
@@ -344,7 +344,7 @@ def hybrid_stepwise_selection(
             by default: an anchor is also dropped when removing it from the
             final set raises the Poisson deviance by less than this margin
             (scaled by ``max(1, phi)`` like the search margin when
-            ``dispersion_scaled``). 
+            ``dispersion_scaled``).
         decomposition_method (callable): Solver ``f(m, P) -> exposures``.
             Default ``decomposeQP``.
         max_iterations (int): Cap on the number of moves. Default 200.
@@ -359,7 +359,8 @@ def hybrid_stepwise_selection(
     if isinstance(min_deviance_gain, str):
         if min_deviance_gain != "bonferroni":
             raise ValueError(
-                "'min_deviance_gain' must be a positive deviance margin or 'bonferroni'."
+                "'min_deviance_gain' must be a positive deviance margin "
+                "or 'bonferroni'."
             )
         min_deviance_gain = bonferroni_margin(P.shape[1])
     if min_deviance_gain is None or min_deviance_gain <= 0:

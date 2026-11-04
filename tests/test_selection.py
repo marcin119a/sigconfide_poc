@@ -8,8 +8,8 @@ from sigconfide.estimates.selection import (
     bonferroni_margin,
     exposure_intervals,
     hybrid_stepwise_selection,
-    support_dispersion,
     selection_stability,
+    support_dispersion,
 )
 
 
