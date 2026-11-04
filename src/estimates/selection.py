@@ -244,9 +244,7 @@ def _forward_backward(
     return cols
 
 
-def _anchor_check(
-    m, counts, P, cols, protected, floor, min_cost, decomposition_method
-):
+def _anchor_check(m, counts, P, cols, protected, floor, min_cost, decomposition_method):
     """Drop anchor signatures the final fit does not use.
 
     An anchor signature is carried through the search unconditionally so

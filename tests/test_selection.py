@@ -180,9 +180,7 @@ class TestDeviance:
         rng = np.random.default_rng(1)
         P = rng.dirichlet(np.ones(48) * 0.5, size=6).T
         mu = 50000 * (P @ np.array([0.5, 0.0, 0.3, 0.0, 0.2, 0.0]))
-        phis = [
-            support_dispersion(rng.poisson(mu).astype(float), P) for _ in range(20)
-        ]
+        phis = [support_dispersion(rng.poisson(mu).astype(float), P) for _ in range(20)]
         assert 0.5 < np.median(phis) < 2.0
 
     def test_support_dispersion_grows_with_multiplicative_noise(self):
@@ -372,7 +370,10 @@ class TestHybridStepwiseSelection:
     def test_anchor_min_cost_keeps_at_least_two(self, simple_P):
         counts = _counts(simple_P, np.array([0.0, 0.0, 1.0]))
         idx, _, _ = hybrid_stepwise_selection(
-            counts, simple_P, anchor_indices=[0, 1], anchor_floor=None,
+            counts,
+            simple_P,
+            anchor_indices=[0, 1],
+            anchor_floor=None,
             anchor_min_cost=1e6,
         )
         assert len(idx) >= 2
